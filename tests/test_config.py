@@ -66,3 +66,52 @@ def test_config_validation_errors(
 ) -> None:
     with pytest.raises(ConfigError, match=expected_substr):
         Config.from_env(env=env_overrides, dotenv_path=None)
+
+
+def test_config_llm_presets_fallback_glossary_and_inline_options() -> None:
+    groq_cfg = Config.from_env(
+        env={
+            "BOT_TOKEN": "123:ABC",
+            "TRANSLATOR_PROVIDER": "groq",
+            "TRANSLATOR_API_KEY": "gsk_test",
+            "TRANSLATOR_FALLBACK_PROVIDER": "libretranslate, google, groq",
+            "TRANSLATOR_GLOSSARY": "mivta, Kubernetes, mivta, FastAPI",
+            "INLINE_EXTRA_LANGS": "pl, de",
+            "INLINE_STYLE_VARIANTS": "false",
+        },
+        dotenv_path=None,
+    )
+    assert groq_cfg.translator_provider == "groq"
+    assert groq_cfg.translator_api_url == "https://api.groq.com/openai/v1"
+    assert groq_cfg.translator_model == "llama-3.3-70b-versatile"
+    assert groq_cfg.translator_fallback_providers == ("libretranslate", "google")
+    assert groq_cfg.translator_glossary == ("mivta", "Kubernetes", "FastAPI")
+    assert groq_cfg.inline_extra_langs == ("pl", "de")
+    assert groq_cfg.inline_style_variants is False
+
+    gemini_cfg = Config.from_env(
+        env={
+            "BOT_TOKEN": "123:ABC",
+            "TRANSLATOR_PROVIDER": "gemini",
+            "TRANSLATOR_API_KEY": "AIza_test",
+        },
+        dotenv_path=None,
+    )
+    assert gemini_cfg.translator_api_url == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert gemini_cfg.translator_model == "gemini-2.5-flash"
+
+    with pytest.raises(ConfigError, match="TRANSLATOR_API_KEY"):
+        Config.from_env(
+            env={"BOT_TOKEN": "123:ABC", "TRANSLATOR_PROVIDER": "groq"},
+            dotenv_path=None,
+        )
+
+    with pytest.raises(ConfigError, match="TRANSLATOR_FALLBACK_API_KEY"):
+        Config.from_env(
+            env={
+                "BOT_TOKEN": "123:ABC",
+                "TRANSLATOR_PROVIDER": "google",
+                "TRANSLATOR_FALLBACK_PROVIDER": "deepl",
+            },
+            dotenv_path=None,
+        )

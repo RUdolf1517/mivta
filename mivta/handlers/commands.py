@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -12,6 +14,7 @@ from aiogram.types import (
     Message,
 )
 
+from mivta.config import MAX_INLINE_EXTRA_LANGS
 from mivta.database import Database, UserSettings
 from mivta.translator.base import STYLE_LABELS_RU, TranslationStyle, parse_style
 from mivta.utils.languages import (
@@ -23,21 +26,31 @@ from mivta.utils.languages import (
     resolve_language,
 )
 
+_CLEAR_TOKENS = frozenset({"off", "clear", "none", "reset", "выкл", "сброс", "-"})
+
+
+def _format_extra_langs(extra_langs: tuple[str, ...]) -> str:
+    if not extra_langs:
+        return "выкл"
+    return ", ".join(code.upper() for code in extra_langs)
+
 
 def _format_settings_text(settings: UserSettings, bot_username: str) -> str:
     src_label = language_label(settings.source_lang)
     tgt_label = language_label(settings.target_lang)
     style_label = STYLE_LABELS_RU[settings.style]
+    extra_str = _format_extra_langs(settings.extra_langs)
     return (
         "Настройки перевода mivta\n\n"
         f"• Исходный язык: {src_label}\n"
         f"• Язык перевода: {tgt_label}\n"
+        f"• Доп. языки Inline: {extra_str}\n"
         f"• Стиль: {style_label}\n\n"
         "Inline Mode (любой чат):\n"
         f"• @{bot_username} Привет, как дела?\n"
         f"• @{bot_username} >de текст · ru>en текст · !formal текст\n\n"
-        "Telegram Business (личные чаты 1-на-1, без метки via @bot):\n"
-        "• > Привет, как дела?\n"
+        "Secretary Mode / Автоматизация чатов (без via @bot):\n"
+        "• > Привет, как дела? (текст и подписи к фото/файлам)\n"
         "• >de текст · ru>pl !formal текст"
     )
 
@@ -86,6 +99,17 @@ def _main_settings_keyboard(settings: UserSettings) -> InlineKeyboardMarkup:
                 text=f"Исходный ({src_short}) ▸",
                 callback_data="cfg:src_menu:1",
             ),
+        ]
+    )
+
+    # Multi-card extra inline languages picker
+    extra_short = _format_extra_langs(settings.extra_langs)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"Доп. карточки Inline ({extra_short}) ▸",
+                callback_data="cfg:extra_menu:1",
+            )
         ]
     )
 
@@ -150,6 +174,62 @@ def _language_grid_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _extra_languages_keyboard(
+    *,
+    extra_langs: tuple[str, ...],
+    page: int,
+) -> InlineKeyboardMarkup:
+    codes = QUICK_LANGUAGES_PRIMARY if page == 1 else QUICK_LANGUAGES_SECONDARY
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if extra_langs:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✕ Сбросить доп. языки (оставить один)",
+                    callback_data=f"cfg:clear_extra:{page}",
+                )
+            ]
+        )
+
+    current_row: list[InlineKeyboardButton] = []
+    for code in codes:
+        info = LANGUAGE_BY_CODE[code]
+        prefix = "✓ " if code in extra_langs else ""
+        current_row.append(
+            InlineKeyboardButton(
+                text=f"{prefix}{info.russian_name} ({code})",
+                callback_data=f"cfg:toggle_extra:{code}:{page}",
+            )
+        )
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+
+    other_page = 2 if page == 1 else 1
+    other_label = "Ещё языки ▸" if page == 1 else "◂ Основные языки"
+    rows.append(
+        [
+            InlineKeyboardButton(text="◂ Готово", callback_data="cfg:main"),
+            InlineKeyboardButton(
+                text=other_label,
+                callback_data=f"cfg:extra_menu:{other_page}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _extra_menu_title(settings: UserSettings) -> str:
+    extra_str = _format_extra_langs(settings.extra_langs)
+    return (
+        f"Дополнительные языки для карточек Inline Mode (до {MAX_INLINE_EXTRA_LANGS}):\n"
+        f"Основной язык: {settings.target_lang.upper()} · Доп.: {extra_str}"
+    )
+
+
 async def _edit_safely(
     callback: CallbackQuery,
     text: str,
@@ -181,12 +261,12 @@ async def cmd_start(
         return
 
     text = (
-        "mivta — переводчик для Telegram Inline Mode.\n\n"
+        "mivta — переводчик для Telegram Inline & Secretary Mode.\n\n"
         "Бот не переводит пересланные или личные сообщения здесь. "
         "Чтобы перевести текст, вызовите бота прямо в поле ввода любого чата:\n\n"
         f"@{bot_username} Привет, как дела?\n\n"
         "Выберите готовый перевод во всплывающем окне — и он отправится от вашего имени.\n\n"
-        "Ниже можно настроить язык по умолчанию, исходный язык и стиль перевода."
+        "Ниже можно настроить язык по умолчанию, доп. карточки Inline и стиль перевода."
     )
     await message.answer(text, reply_markup=_main_settings_keyboard(settings))
 
@@ -235,6 +315,60 @@ async def cmd_lang(
         return
 
     settings = await db.update_user_settings(user_id, target_lang=resolved)
+    await message.answer(
+        _format_settings_text(settings, bot_username),
+        reply_markup=_main_settings_keyboard(settings),
+    )
+
+
+async def cmd_langs(
+    message: Message,
+    command: CommandObject,
+    db: Database,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Configure 1-3 extra inline card target languages (`/langs pl de` or `/langs off`)."""
+    if message.from_user is None:
+        return
+    user_id = message.from_user.id
+    raw_args = (command.args or "").strip()
+    if not raw_args:
+        settings = await db.get_user_settings(user_id)
+        await message.answer(
+            _extra_menu_title(settings),
+            reply_markup=_extra_languages_keyboard(extra_langs=settings.extra_langs, page=1),
+        )
+        return
+
+    if raw_args.lower() in _CLEAR_TOKENS:
+        settings = await db.update_user_settings(user_id, extra_langs=())
+        await message.answer(
+            _format_settings_text(settings, bot_username),
+            reply_markup=_main_settings_keyboard(settings),
+        )
+        return
+
+    tokens = [tok for tok in re.split(r"[\s,;]+", raw_args) if tok]
+    resolved_codes: list[str] = []
+    for tok in tokens:
+        code = resolve_language(tok, allow_auto=False)
+        if code is None:
+            await message.answer(
+                f"Неизвестный код языка: «{tok}».\n"
+                "Пример: /langs pl de · отключить: /langs off"
+            )
+            return
+        if code not in resolved_codes:
+            resolved_codes.append(code)
+
+    if len(resolved_codes) > MAX_INLINE_EXTRA_LANGS:
+        await message.answer(
+            f"Можно выбрать не более {MAX_INLINE_EXTRA_LANGS} дополнительных языков.\n"
+            "Пример: /langs pl de"
+        )
+        return
+
+    settings = await db.update_user_settings(user_id, extra_langs=resolved_codes)
     await message.answer(
         _format_settings_text(settings, bot_username),
         reply_markup=_main_settings_keyboard(settings),
@@ -351,6 +485,57 @@ async def handle_settings_callback(
         await callback.answer()
         return
 
+    if action == "extra_menu":
+        page = 2 if arg == "2" else 1
+        settings = await db.get_user_settings(user_id)
+        await _edit_safely(
+            callback,
+            _extra_menu_title(settings),
+            _extra_languages_keyboard(extra_langs=settings.extra_langs, page=page),
+        )
+        await callback.answer()
+        return
+
+    if action == "toggle_extra":
+        page = 2 if (len(parts) > 3 and parts[3] == "2") else 1
+        resolved = resolve_language(arg, allow_auto=False)
+        if resolved is None:
+            await callback.answer("Неизвестный язык", show_alert=False)
+            return
+        settings = await db.get_user_settings(user_id)
+        current = list(settings.extra_langs)
+        if resolved in current:
+            current.remove(resolved)
+            note = f"Убран: {language_label(resolved)}"
+        else:
+            if len(current) >= MAX_INLINE_EXTRA_LANGS:
+                await callback.answer(
+                    f"Максимум {MAX_INLINE_EXTRA_LANGS} доп. языка",
+                    show_alert=False,
+                )
+                return
+            current.append(resolved)
+            note = f"Добавлен: {language_label(resolved)}"
+        updated = await db.update_user_settings(user_id, extra_langs=current)
+        await _edit_safely(
+            callback,
+            _extra_menu_title(updated),
+            _extra_languages_keyboard(extra_langs=updated.extra_langs, page=page),
+        )
+        await callback.answer(note)
+        return
+
+    if action == "clear_extra":
+        page = 2 if arg == "2" else 1
+        updated = await db.update_user_settings(user_id, extra_langs=())
+        await _edit_safely(
+            callback,
+            _extra_menu_title(updated),
+            _extra_languages_keyboard(extra_langs=updated.extra_langs, page=page),
+        )
+        await callback.answer("Дополнительные языки сброшены")
+        return
+
     if action == "set_tgt":
         resolved = resolve_language(arg, allow_auto=False)
         if resolved is None:
@@ -432,6 +617,7 @@ def build_commands_router() -> Router:
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_settings, Command("help", "settings"))
     router.message.register(cmd_lang, Command("lang"))
+    router.message.register(cmd_langs, Command("langs"))
     router.message.register(cmd_source, Command("source"))
     router.message.register(cmd_style, Command("style"))
     router.callback_query.register(handle_settings_callback, F.data.startswith("cfg:"))

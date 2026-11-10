@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
+from mivta.config import MAX_INLINE_EXTRA_LANGS
 from mivta.translator.base import TranslationStyle, parse_style
 from mivta.utils.languages import resolve_language
 
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     target_lang TEXT NOT NULL DEFAULT 'en',
     style TEXT NOT NULL DEFAULT 'neutral'
         CHECK (style IN ('neutral', 'casual', 'formal')),
+    extra_langs TEXT DEFAULT NULL,
     updated_at INTEGER NOT NULL
 );
 
@@ -33,6 +36,34 @@ CREATE TABLE IF NOT EXISTS business_connections (
 """
 
 
+def _parse_stored_extra_langs(raw: str) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    langs: list[str] = []
+    for piece in raw.split(","):
+        code = resolve_language(piece, allow_auto=False)
+        if code is not None and code not in langs:
+            langs.append(code)
+            if len(langs) >= MAX_INLINE_EXTRA_LANGS:
+                break
+    return tuple(langs)
+
+
+def _normalize_extra_langs_input(codes: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for raw_code in codes:
+        resolved = resolve_language(raw_code, allow_auto=False)
+        if resolved is None:
+            raise ValueError(f"Unsupported extra target language: {raw_code!r}")
+        if resolved not in normalized:
+            normalized.append(resolved)
+    if len(normalized) > MAX_INLINE_EXTRA_LANGS:
+        raise ValueError(
+            f"At most {MAX_INLINE_EXTRA_LANGS} extra inline languages are supported"
+        )
+    return tuple(normalized)
+
+
 @dataclass(frozen=True, slots=True)
 class UserSettings:
     """Saved translation preferences for a single Telegram user."""
@@ -41,6 +72,7 @@ class UserSettings:
     source_lang: str
     target_lang: str
     style: TranslationStyle
+    extra_langs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,16 +96,18 @@ class Database:
         default_source_lang: str = "auto",
         default_target_lang: str = "en",
         default_style: TranslationStyle = TranslationStyle.NEUTRAL,
+        default_extra_langs: Sequence[str] = (),
     ) -> None:
         self._path = path
         self._default_source = default_source_lang
         self._default_target = default_target_lang
         self._default_style = default_style
+        self._default_extra_langs = _normalize_extra_langs_input(default_extra_langs)
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Open the SQLite database connection and ensure schema exists."""
+        """Open the SQLite database connection and ensure schema + migrations exist."""
         if self._conn is not None:
             return
         if self._path != ":memory:" and not self._path.startswith("file:"):
@@ -88,6 +122,15 @@ class Database:
             await conn.execute("PRAGMA synchronous=NORMAL;")
         await conn.execute("PRAGMA temp_store=MEMORY;")
         await conn.executescript(_SCHEMA_SQL)
+
+        # Idempotent migration for databases created on v0.1.0
+        async with conn.execute("PRAGMA table_info(user_settings);") as cursor:
+            cols = {str(r["name"]) for r in await cursor.fetchall()}
+        if "extra_langs" not in cols:
+            await conn.execute(
+                "ALTER TABLE user_settings ADD COLUMN extra_langs TEXT DEFAULT NULL;"
+            )
+
         await conn.commit()
         self._conn = conn
 
@@ -108,13 +151,15 @@ class Database:
             source_lang=self._default_source,
             target_lang=self._default_target,
             style=self._default_style,
+            extra_langs=self._default_extra_langs,
         )
 
     async def get_user_settings(self, user_id: int) -> UserSettings:
         """Fetch saved settings for user_id, falling back to configured defaults."""
         conn = self._require_conn()
         async with conn.execute(
-            "SELECT source_lang, target_lang, style FROM user_settings WHERE user_id = ?",
+            "SELECT source_lang, target_lang, style, extra_langs "
+            "FROM user_settings WHERE user_id = ?",
             (user_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -125,11 +170,18 @@ class Database:
         src = resolve_language(str(row["source_lang"]), allow_auto=True) or self._default_source
         tgt = resolve_language(str(row["target_lang"]), allow_auto=False) or self._default_target
         style = parse_style(str(row["style"])) or self._default_style
+        raw_extra = row["extra_langs"]
+        extra_langs = (
+            self._default_extra_langs
+            if raw_extra is None
+            else _parse_stored_extra_langs(str(raw_extra))
+        )
         return UserSettings(
             user_id=user_id,
             source_lang=src,
             target_lang=tgt,
             style=style,
+            extra_langs=extra_langs,
         )
 
     async def update_user_settings(
@@ -139,14 +191,26 @@ class Database:
         source_lang: str | None = None,
         target_lang: str | None = None,
         style: TranslationStyle | None = None,
+        extra_langs: Sequence[str] | None = None,
     ) -> UserSettings:
         """Atomically upsert one or more user preferences and return the resulting settings."""
         conn = self._require_conn()
         async with self._write_lock:
+            async with conn.execute(
+                "SELECT source_lang, target_lang, style, extra_langs "
+                "FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ) as cursor:
+                existing_row = await cursor.fetchone()
+
             current = await self.get_user_settings(user_id)
             next_source = current.source_lang
             next_target = current.target_lang
             next_style = current.style
+            stored_extra: str | None = (
+                None if existing_row is None else existing_row["extra_langs"]
+            )
+            next_extra = current.extra_langs
 
             if source_lang is not None:
                 resolved_src = resolve_language(source_lang, allow_auto=True)
@@ -163,18 +227,25 @@ class Database:
             if style is not None:
                 next_style = style
 
+            if extra_langs is not None:
+                next_extra = _normalize_extra_langs_input(extra_langs)
+                stored_extra = ",".join(next_extra)
+
             now_ts = int(time.time())
             await conn.execute(
                 """
-                INSERT INTO user_settings (user_id, source_lang, target_lang, style, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO user_settings (
+                    user_id, source_lang, target_lang, style, extra_langs, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     source_lang = excluded.source_lang,
                     target_lang = excluded.target_lang,
                     style = excluded.style,
+                    extra_langs = excluded.extra_langs,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, next_source, next_target, next_style.value, now_ts),
+                (user_id, next_source, next_target, next_style.value, stored_extra, now_ts),
             )
             await conn.commit()
 
@@ -183,6 +254,7 @@ class Database:
                 source_lang=next_source,
                 target_lang=next_target,
                 style=next_style,
+                extra_langs=next_extra,
             )
 
     async def upsert_business_connection(

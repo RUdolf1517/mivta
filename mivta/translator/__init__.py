@@ -18,6 +18,7 @@ from mivta.translator.base import (
 )
 from mivta.translator.deepl import DeepLTranslator
 from mivta.translator.factory import create_http_client, create_translator
+from mivta.translator.fallback import FallbackTranslator
 from mivta.translator.google import GoogleTranslator
 from mivta.translator.libre import LibreTranslateTranslator
 from mivta.translator.openai import OpenAITranslator
@@ -25,6 +26,7 @@ from mivta.translator.openai import OpenAITranslator
 __all__ = [
     "STYLE_LABELS_RU",
     "DeepLTranslator",
+    "FallbackTranslator",
     "GoogleTranslator",
     "InvalidTranslationRequestError",
     "LibreTranslateTranslator",

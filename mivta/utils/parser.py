@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from aiogram.types import MessageEntity
 
 from mivta.translator.base import TranslationStyle, parse_style
 from mivta.utils.languages import resolve_language
@@ -25,20 +28,47 @@ class ParsedInlineQuery:
     target_lang: str | None = None
     style: TranslationStyle | None = None
     error: str | None = None
+    entities: tuple[MessageEntity, ...] = ()
+
+
+def _sanitize_with_map(raw: str) -> tuple[str, list[int]]:
+    """Sanitize raw input while mapping each output char index back to its index in `raw`."""
+    if not raw:
+        return "", []
+
+    out_chars: list[str] = []
+    out_to_raw: list[int] = []
+    idx = 0
+    raw_len = len(raw)
+    while idx < raw_len:
+        ch = raw[idx]
+        if ch == "\r":
+            out_chars.append("\n")
+            out_to_raw.append(idx)
+            if idx + 1 < raw_len and raw[idx + 1] == "\n":
+                idx += 2
+                continue
+            idx += 1
+            continue
+        if ch in ("\n", "\t") or (ord(ch) >= 0x20 and not (0x7F <= ord(ch) <= 0x9F)):
+            out_chars.append(ch)
+            out_to_raw.append(idx)
+        idx += 1
+
+    start = 0
+    end = len(out_chars)
+    while start < end and out_chars[start] in (" ", "\t", "\n"):
+        start += 1
+    while end > start and out_chars[end - 1] in (" ", "\t", "\n"):
+        end -= 1
+
+    return "".join(out_chars[start:end]), out_to_raw[start:end]
 
 
 def sanitize_text(raw: str) -> str:
     """Normalize line endings and strip non-printable C0/C1 control characters."""
-    if not raw:
-        return ""
-    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    # Preserve \n (0x0A), \t (0x09), and all printable Unicode (including ZWJ / emoji / RTL)
-    cleaned_chars = [
-        ch
-        for ch in normalized
-        if ch in ("\n", "\t") or (ord(ch) >= 0x20 and not (0x7F <= ord(ch) <= 0x9F))
-    ]
-    return "".join(cleaned_chars).strip(" \t\n")
+    cleaned, _ = _sanitize_with_map(raw)
+    return cleaned
 
 
 def has_translatable_text(text: str) -> bool:
@@ -54,39 +84,127 @@ def truncate_preview(text: str, limit: int = 80) -> str:
     return single_line[: limit - 1].rstrip() + "…"
 
 
+def _rebase_entities_from_map(
+    raw: str,
+    entities: Sequence[MessageEntity] | None,
+    body_text: str,
+    body_to_raw: list[int],
+) -> tuple[MessageEntity, ...]:
+    """Rebase Telegram UTF-16 `MessageEntity` offsets from `raw` onto `body_text`."""
+    if not entities or not body_text or not body_to_raw:
+        return ()
+
+    raw_u16: list[int] = [0] * (len(raw) + 1)
+    acc = 0
+    for i, ch in enumerate(raw):
+        acc += 2 if ord(ch) > 0xFFFF else 1
+        raw_u16[i + 1] = acc
+
+    u16_to_raw_py: dict[int, int] = {u16: py_i for py_i, u16 in enumerate(raw_u16)}
+
+    body_u16: list[int] = [0] * (len(body_text) + 1)
+    acc_b = 0
+    for i, ch in enumerate(body_text):
+        acc_b += 2 if ord(ch) > 0xFFFF else 1
+        body_u16[i + 1] = acc_b
+
+    # Map each raw python position to its corresponding body python position (or boundary)
+    first_raw = body_to_raw[0]
+    last_raw_excl = body_to_raw[-1] + 1
+
+    def _map_raw_start(raw_py: int) -> int:
+        if raw_py <= first_raw:
+            return 0
+        for b_idx, r_idx in enumerate(body_to_raw):
+            if r_idx >= raw_py:
+                return b_idx
+        return len(body_text)
+
+    def _map_raw_end(raw_py: int) -> int:
+        if raw_py <= first_raw:
+            return 0
+        if raw_py >= last_raw_excl:
+            return len(body_text)
+        for b_idx in range(len(body_to_raw) - 1, -1, -1):
+            if body_to_raw[b_idx] < raw_py:
+                return b_idx + 1
+        return 0
+
+    rebased: list[MessageEntity] = []
+    for ent in entities:
+        u_start = ent.offset
+        u_end = ent.offset + ent.length
+        if u_end <= u_start or u_start < 0 or u_end > raw_u16[-1]:
+            continue
+        raw_py_start = u16_to_raw_py.get(u_start)
+        raw_py_end = u16_to_raw_py.get(u_end)
+        if raw_py_start is None or raw_py_end is None:
+            continue
+        if raw_py_end <= first_raw or raw_py_start >= last_raw_excl:
+            continue
+
+        b_start = _map_raw_start(raw_py_start)
+        b_end = _map_raw_end(raw_py_end)
+        if b_end <= b_start:
+            continue
+
+        new_u_off = body_u16[b_start]
+        new_u_len = body_u16[b_end] - new_u_off
+        if new_u_len <= 0:
+            continue
+        rebased.append(ent.model_copy(update={"offset": new_u_off, "length": new_u_len}))
+
+    return tuple(rebased)
+
+
 def _parse_directives(
     raw: str,
     *,
     allow_bare_gt: bool,
+    entities: Sequence[MessageEntity] | None = None,
 ) -> tuple[ParsedInlineQuery, bool]:
     """Shared parser returning (ParsedInlineQuery, saw_gt_trigger)."""
-    remainder = sanitize_text(raw)
-    if not remainder:
+    sanitized, san_to_raw = _sanitize_with_map(raw)
+    if not sanitized:
         return ParsedInlineQuery(text=""), False
 
     source_override: str | None = None
     target_override: str | None = None
     style_override: TranslationStyle | None = None
     saw_gt_trigger = False
+    offset = 0
+    san_len = len(sanitized)
+
+    def _trim_slice(start_idx: int) -> tuple[str, list[int]]:
+        s = start_idx
+        e = san_len
+        while s < e and sanitized[s] in (" ", "\t", "\n"):
+            s += 1
+        while e > s and sanitized[e - 1] in (" ", "\t", "\n"):
+            e -= 1
+        return sanitized[s:e], san_to_raw[s:e]
 
     # Inspect at most 2 leading directive tokens (e.g. `>de !formal Hello` or `> !casual Hi`)
     for _ in range(2):
+        remainder = sanitized[offset:]
         match = _LEADING_TOKEN_RE.match(remainder)
         if match is None:
             break
         token = match.group("token")
-        rest = match.group("rest")
+        rest_start = offset + match.start("rest")
+        while rest_start < san_len and sanitized[rest_start] in (" ", "\t"):
+            rest_start += 1
 
         if token.startswith("!") and len(token) > 1 and style_override is None:
             parsed_style = parse_style(token[1:])
             if parsed_style is not None:
                 style_override = parsed_style
-                remainder = rest.lstrip(" \t")
+                offset = rest_start
                 continue
 
         if allow_bare_gt and token == ">" and not saw_gt_trigger:
             saw_gt_trigger = True
-            remainder = rest.lstrip(" \t")
+            offset = rest_start
             continue
 
         if ">" in token and not saw_gt_trigger:
@@ -96,15 +214,16 @@ def _parse_directives(
                 raw_tgt = target_match.group("tgt")
                 resolved_tgt = resolve_language(raw_tgt, allow_auto=False)
                 if resolved_tgt is None:
+                    err_text, _ = _trim_slice(rest_start)
                     return (
                         ParsedInlineQuery(
-                            text=rest.strip(" \t\n"),
+                            text=err_text,
                             error=f"Неизвестный код языка назначения: «{raw_tgt}»",
                         ),
                         True,
                     )
                 target_override = resolved_tgt
-                remainder = rest.lstrip(" \t")
+                offset = rest_start
                 continue
 
             pair_match = _PAIR_DIRECTIVE_RE.match(token)
@@ -114,35 +233,40 @@ def _parse_directives(
                 raw_tgt = pair_match.group("tgt")
                 resolved_src = resolve_language(raw_src, allow_auto=True)
                 if resolved_src is None:
+                    err_text, _ = _trim_slice(rest_start)
                     return (
                         ParsedInlineQuery(
-                            text=rest.strip(" \t\n"),
+                            text=err_text,
                             error=f"Неизвестный код исходного языка: «{raw_src}»",
                         ),
                         True,
                     )
                 resolved_tgt = resolve_language(raw_tgt, allow_auto=False)
                 if resolved_tgt is None:
+                    err_text, _ = _trim_slice(rest_start)
                     return (
                         ParsedInlineQuery(
-                            text=rest.strip(" \t\n"),
+                            text=err_text,
                             error=f"Неизвестный код языка назначения: «{raw_tgt}»",
                         ),
                         True,
                     )
                 source_override = resolved_src
                 target_override = resolved_tgt
-                remainder = rest.lstrip(" \t")
+                offset = rest_start
                 continue
 
         break
 
+    body_text, body_map = _trim_slice(offset)
+    rebased_entities = _rebase_entities_from_map(raw, entities, body_text, body_map)
     return (
         ParsedInlineQuery(
-            text=remainder.strip(" \t\n"),
+            text=body_text,
             source_lang=source_override,
             target_lang=target_override,
             style=style_override,
+            entities=rebased_entities,
         ),
         saw_gt_trigger,
     )
@@ -154,9 +278,12 @@ def parse_inline_query(raw: str) -> ParsedInlineQuery:
     return parsed
 
 
-def parse_business_query(raw: str) -> ParsedInlineQuery | None:
+def parse_business_query(
+    raw: str,
+    entities: Sequence[MessageEntity] | None = None,
+) -> ParsedInlineQuery | None:
     """Parse Business Mode text; returns None unless triggered via `>`, `>lang`, or `src>tgt`."""
-    parsed, triggered = _parse_directives(raw, allow_bare_gt=True)
+    parsed, triggered = _parse_directives(raw, allow_bare_gt=True, entities=entities)
     if not triggered:
         return None
     return parsed

@@ -14,6 +14,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
     AnswerInlineQuery,
+    EditMessageCaption,
     EditMessageText,
     SendMessage,
     TelegramMethod,
@@ -25,6 +26,8 @@ from aiogram.types import (
     Chat,
     InlineQuery,
     Message,
+    MessageEntity,
+    PhotoSize,
     Update,
     User,
 )
@@ -62,12 +65,13 @@ class RecordingSession(BaseSession):
         self.calls.append(method)
         if isinstance(method, (AnswerInlineQuery, AnswerCallbackQuery)):
             return True
-        if isinstance(method, (SendMessage, EditMessageText)):
+        if isinstance(method, (SendMessage, EditMessageText, EditMessageCaption)):
             return Message(
                 message_id=999,
                 date=dt.datetime.now(dt.UTC),
                 chat=Chat(id=100, type="private"),
-                text=getattr(method, "text", ""),
+                text=getattr(method, "text", None),
+                caption=getattr(method, "caption", None),
             )
         return True
 
@@ -492,3 +496,152 @@ def test_translator_package_is_independent_of_telegram_and_sqlite() -> None:
                 assert not node.module.startswith("mivta.handlers")
                 assert not node.module.startswith("mivta.database")
                 assert not node.module.startswith("mivta.bot")
+                assert not node.module.startswith("mivta.config")
+
+
+async def test_business_mode_media_captions_and_entities_preserved(harness) -> None:
+    dp, bot, session, _, translator, _, _ = harness
+
+    await dp.feed_update(bot, _business_conn_update(200, conn_id="bc-cap", owner_uid=777))
+    session.calls.clear()
+
+    photo = [PhotoSize(file_id="f1", file_unique_id="u1", width=100, height=100)]
+
+    # 1. Outgoing photo without `>` in caption -> ignored
+    msg_normal = Message(
+        message_id=201,
+        date=dt.datetime.now(dt.UTC),
+        chat=Chat(id=999, type="private"),
+        from_user=_user(777),
+        business_connection_id="bc-cap",
+        photo=photo,
+        caption="Просто фото без префикса",
+    )
+    await dp.feed_update(bot, Update(update_id=201, business_message=msg_normal))
+    assert len(session.calls) == 0
+
+    # 2. Incoming photo from interlocutor even with `>` -> ignored
+    msg_incoming = Message(
+        message_id=202,
+        date=dt.datetime.now(dt.UTC),
+        chat=Chat(id=999, type="private"),
+        from_user=_user(999),
+        business_connection_id="bc-cap",
+        photo=photo,
+        caption="> Привет, как дела?",
+    )
+    await dp.feed_update(bot, Update(update_id=202, business_message=msg_incoming))
+    assert len(session.calls) == 0
+
+    # 3. Outgoing photo from owner with `>` caption + bold & code entities -> EditMessageCaption!
+    raw_caption = "> Важно: запусти pytest -q"
+    # "> " is 2 UTF-16 units; "Важно" at offset 2..7, "pytest -q" at offset 17..26
+    caption_entities = [
+        MessageEntity(type="bold", offset=2, length=5),
+        MessageEntity(type="code", offset=17, length=9),
+    ]
+
+    class TagAwareStub(StubTranslator):
+        async def translate(self, request: TranslationRequest) -> TranslationResult:
+            self.requests.append(request)
+            out = request.text.replace("Важно", "Important").replace("запусти", "run")
+            return TranslationResult(
+                translated_text=out,
+                source_lang="ru",
+                target_lang=request.target_lang,
+                style=request.style,
+                provider=self.name,
+            )
+
+    dp["translator"] = TagAwareStub()
+    msg_owner = Message(
+        message_id=203,
+        date=dt.datetime.now(dt.UTC),
+        chat=Chat(id=999, type="private"),
+        from_user=_user(777),
+        business_connection_id="bc-cap",
+        photo=photo,
+        caption=raw_caption,
+        caption_entities=caption_entities,
+    )
+    await dp.feed_update(bot, Update(update_id=203, business_message=msg_owner))
+    assert len(session.calls) == 1
+    cap_call = session.calls[0]
+    assert isinstance(cap_call, EditMessageCaption)
+    assert cap_call.business_connection_id == "bc-cap"
+    assert cap_call.caption == "Important: run pytest -q"
+    assert cap_call.caption_entities is not None
+    by_type = {e.type: e for e in cap_call.caption_entities}
+    b_ent = by_type["bold"]
+    c_ent = by_type["code"]
+    assert cap_call.caption[b_ent.offset : b_ent.offset + b_ent.length] == "Important"
+    assert cap_call.caption[c_ent.offset : c_ent.offset + c_ent.length] == "pytest -q"
+    assert translator.requests == []
+
+
+async def test_inline_multicard_styles_extra_langs_and_code_entities(harness) -> None:
+    dp, bot, session, db, _, _, _ = harness
+
+    class StyleBatchStub(StubTranslator):
+        supports_styles = True
+        batch_calls = 0
+
+        async def translate_styles(self, request, styles):
+            self.batch_calls += 1
+            return [
+                TranslationResult(
+                    translated_text={
+                        TranslationStyle.NEUTRAL: f"Neutral: {request.text}",
+                        TranslationStyle.CASUAL: f"Casual: {request.text}",
+                        TranslationStyle.FORMAL: f"Formal: {request.text}",
+                    }[st],
+                    source_lang="ru",
+                    target_lang=request.target_lang,
+                    style=st,
+                    provider="groq",
+                )
+                for st in styles
+            ]
+
+    style_stub = StyleBatchStub()
+    dp["translator"] = style_stub
+
+    # 1. Style-capable provider returns 3 style cards in 1 batched call (preferred style first)
+    await dp.feed_update(bot, _message_update(300, "/style formal"))
+    session.calls.clear()
+    await dp.feed_update(bot, _inline_update(301, "Привет `git status` @rudolf"))
+    assert style_stub.batch_calls == 1
+    ans = session.calls[-1]
+    assert isinstance(ans, AnswerInlineQuery)
+    assert len(ans.results) == 3
+    assert ans.results[0].input_message_content.message_text.startswith("Formal:")
+    assert "git status" in ans.results[0].input_message_content.message_text
+    assert "`" not in ans.results[0].input_message_content.message_text
+    ent_types = {e.type for e in (ans.results[0].input_message_content.entities or [])}
+    assert {"code", "mention"} <= ent_types
+
+    # 2. Configure extra inline languages via /langs and settings callbacks -> multi-language cards!
+    await dp.feed_update(bot, _message_update(302, "/langs pl de"))
+    assert (await db.get_user_settings(777)).extra_langs == ("pl", "de")
+
+    session.calls.clear()
+    await dp.feed_update(bot, _inline_update(303, "Привет, как дела?"))
+    multilang_ans = session.calls[-1]
+    assert isinstance(multilang_ans, AnswerInlineQuery)
+    assert len(multilang_ans.results) == 3
+    descriptions = [r.description for r in multilang_ans.results]
+    assert "→ en" in descriptions[0]
+    assert "→ pl" in descriptions[1]
+    assert "→ de" in descriptions[2]
+
+    # 3. Toggle & clear extra languages via /settings inline callbacks and /langs off
+    await dp.feed_update(bot, _callback_update(304, "cfg:extra_menu:1"))
+    await dp.feed_update(bot, _callback_update(305, "cfg:toggle_extra:fr:1"))
+    assert (await db.get_user_settings(777)).extra_langs == ("pl", "de", "fr")
+    await dp.feed_update(bot, _callback_update(306, "cfg:clear_extra:1"))
+    assert (await db.get_user_settings(777)).extra_langs == ()
+
+    await dp.feed_update(bot, _message_update(307, "/langs es"))
+    assert (await db.get_user_settings(777)).extra_langs == ("es",)
+    await dp.feed_update(bot, _message_update(308, "/langs off"))
+    assert (await db.get_user_settings(777)).extra_langs == ()

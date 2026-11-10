@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mivta"
-version = "0.1.0"
-description = "Minimalist Telegram Inline Mode translator bot"
+version = "0.2.0"
+description = "Minimalist Telegram Inline & Secretary Mode translator bot"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

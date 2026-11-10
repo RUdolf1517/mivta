@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 
@@ -19,6 +21,14 @@ STYLE_LABELS_RU: dict[TranslationStyle, str] = {
     TranslationStyle.NEUTRAL: "нейтральный",
     TranslationStyle.CASUAL: "разговорный",
     TranslationStyle.FORMAL: "формальный",
+}
+
+# OpenAI-compatible LLM presets: provider -> (default_base_url, default_model)
+LLM_PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
+    "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
+    "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
+    "openrouter": ("https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
 }
 
 
@@ -94,14 +104,42 @@ class TranslatorUnavailableError(TranslatorError):
     """Raised when the upstream translation API fails or returns malformed data."""
 
 
+def deduplicate_styles(styles: Sequence[TranslationStyle]) -> list[TranslationStyle]:
+    """Preserve order while removing duplicate TranslationStyle items."""
+    seen: set[TranslationStyle] = set()
+    ordered: list[TranslationStyle] = []
+    for style in styles:
+        if style not in seen:
+            seen.add(style)
+            ordered.append(style)
+    return ordered
+
+
 class Translator(ABC):
     """Abstract asynchronous translator independent of Telegram."""
 
     name: str = "base"
+    supports_styles: bool = False
+    uses_llm_glossary: bool = False
 
     @abstractmethod
     async def translate(self, request: TranslationRequest) -> TranslationResult:
         """Translate text according to request parameters."""
+
+    async def translate_styles(
+        self,
+        request: TranslationRequest,
+        styles: Sequence[TranslationStyle],
+    ) -> list[TranslationResult]:
+        """Translate text across multiple tone registers (concurrently or batched)."""
+        ordered = deduplicate_styles(styles) or [request.style]
+        if not self.supports_styles or len(ordered) == 1:
+            single = await self.translate(replace(request, style=ordered[0]))
+            return [single]
+        results = await asyncio.gather(
+            *(self.translate(replace(request, style=st)) for st in ordered)
+        )
+        return list(results)
 
     async def aclose(self) -> None:
         """Release any resources owned exclusively by the translator."""

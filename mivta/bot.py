@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="settings", description="Настройки языка и стиля перевода"),
     BotCommand(command="lang", description="Язык перевода по умолчанию"),
+    BotCommand(command="langs", description="Доп. языки карточек в Inline Mode"),
     BotCommand(command="source", description="Исходный язык или автоопределение"),
     BotCommand(command="style", description="Стиль: neutral, casual, formal"),
-    BotCommand(command="help", description="Как пользоваться Inline Mode"),
+    BotCommand(command="help", description="Как пользоваться Inline и Secretary Mode"),
 ]
 
 
@@ -93,6 +94,7 @@ async def run_bot(config: Config) -> None:
         default_source_lang=config.default_source_lang,
         default_target_lang=config.default_target_lang,
         default_style=config.default_style,
+        default_extra_langs=config.inline_extra_langs,
     )
     http_client = create_http_client(config.translator_timeout)
     translator = create_translator(
@@ -102,6 +104,11 @@ async def run_bot(config: Config) -> None:
         api_url=config.translator_api_url,
         model=config.translator_model,
         max_length=config.max_text_length,
+        glossary=config.translator_glossary,
+        fallback_providers=config.translator_fallback_providers,
+        fallback_api_key=config.translator_fallback_api_key,
+        fallback_api_url=config.translator_fallback_api_url,
+        fallback_model=config.translator_fallback_model,
     )
     cache = TranslationCache(
         max_size=config.cache_max_size,
@@ -148,7 +155,7 @@ async def run_bot(config: Config) -> None:
 
         business_enabled = bool(getattr(me, "can_connect_to_business", False))
         logger.info(
-            "Starting @%s (provider=%s, default=%s->%s, style=%s, business_mode=%s)",
+            "Starting @%s (provider=%s, default=%s->%s, style=%s, secretary_mode=%s)",
             bot_username,
             translator.name,
             config.default_source_lang,
