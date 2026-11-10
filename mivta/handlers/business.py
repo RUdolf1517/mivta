@@ -95,9 +95,9 @@ async def handle_business_connection(
         await _notify_owner_privately(
             bot,
             connection.user_chat_id,
-            "mivta подключён к Telegram Business, но право «Отвечать на сообщения» "
-            "отключено.\nВключите его в Настройки → Telegram для бизнеса → Чат-боты, "
-            "чтобы бот мог заменять ваши сообщения переводом без метки via @bot.",
+            "mivta подключён к аккаунту, но право «Ответы на сообщения» (Reply to messages) "
+            "отключено.\nВключите его в Настройки → Автоматизация чатов (или Telegram для бизнеса "
+            "→ Чат-боты), чтобы бот мог заменять ваши сообщения переводом без метки via @bot.",
         )
         return
 
