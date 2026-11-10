@@ -221,10 +221,26 @@ curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
          MIVTA_NONINTERACTIVE=1 bash
 ```
 
-**Обновление установленного бота** (сохраняет `/opt/mivta/.env` и `/opt/mivta/data/mivta.db`):
+**Обновление установленного бота** (сохраняет `/opt/mivta/.env` и `/opt/mivta/data/mivta.db`, а также включает ежедневный `systemd`-таймер автообновления и перезапуска `mivta-update.timer` в **06:00** по времени сервера):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
+```
+
+Полезные команды таймера автообновления (`06:00`):
+
+```bash
+# Проверить расписание следующего запуска (и часовой пояс сервера):
+sudo systemctl list-timers mivta-update.timer
+timedatectl
+
+# Изменить время ежедневного обновления/перезапуска (или отключить таймер):
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
+  | sudo MIVTA_AUTO_UPDATE_TIME="06:00" bash
+# Отключить автообновление: sudo /opt/mivta/install.sh --from-local /opt/mivta --no-auto-update
+
+# Запустить проверку обновлений и перезапуск вручную прямо сейчас:
+sudo systemctl start mivta-update.service
 ```
 
 **Удаление сервиса**:

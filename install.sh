@@ -16,11 +16,14 @@ set -euo pipefail
 SERVICE_NAME="${MIVTA_SERVICE_NAME:-mivta}"
 INSTALL_DIR="${MIVTA_INSTALL_DIR:-/opt/mivta}"
 SERVICE_USER="${MIVTA_USER:-mivta}"
+SYSTEMD_DIR="${MIVTA_SYSTEMD_DIR:-/etc/systemd/system}"
 REPO="${MIVTA_REPO:-RUdolf1517/mivta}"
 BRANCH="${MIVTA_BRANCH:-main}"
 SOURCE_DIR="${MIVTA_SOURCE_DIR:-}"
 NONINTERACTIVE="${MIVTA_NONINTERACTIVE:-0}"
 NO_SYSTEMD="${MIVTA_NO_SYSTEMD:-0}"
+AUTO_UPDATE="${MIVTA_AUTO_UPDATE:-1}"
+AUTO_UPDATE_TIME="${MIVTA_AUTO_UPDATE_TIME:-06:00}"
 ACTION="install"
 PURGE=0
 
@@ -57,9 +60,12 @@ Options:
   --dir <PATH>             Install directory (default: /opt/mivta)
   --branch <BRANCH>        Git branch or tag to install (default: main)
   --from-local [DIR]       Install from local checkout instead of cloning GitHub
+  --auto-update-time <T>   Daily auto-update & restart time (default: 06:00)
+  --no-auto-update         Disable daily systemd auto-update & restart timer
+  --self-update            Pull latest code (with rollback safety) and restart service
   --non-interactive        Never prompt on /dev/tty
   --no-systemd             Skip creating/managing systemd service (e.g. containers)
-  --uninstall              Stop and remove systemd service (keeps .env and data/)
+  --uninstall              Stop and remove systemd service & timer (keeps .env and data/)
   --purge                  With --uninstall, also delete install dir and system user
   -h, --help               Show this help message
 
@@ -68,6 +74,7 @@ Environment variables:
   TRANSLATOR_MODEL, TRANSLATOR_FALLBACK_PROVIDER, TRANSLATOR_GLOSSARY,
   DEFAULT_TARGET_LANG, DEFAULT_SOURCE_LANG, DEFAULT_STYLE,
   INLINE_EXTRA_LANGS, INLINE_STYLE_VARIANTS,
+  MIVTA_AUTO_UPDATE=1|0, MIVTA_AUTO_UPDATE_TIME=06:00,
   MIVTA_INSTALL_DIR, MIVTA_USER, MIVTA_REPO, MIVTA_BRANCH, MIVTA_NONINTERACTIVE=1
 EOF
 }
@@ -117,6 +124,20 @@ while [ $# -gt 0 ]; do
         SOURCE_DIR="$(pwd)"
         shift
       fi
+      ;;
+    --auto-update-time)
+      [ $# -ge 2 ] || err "--auto-update-time requires a value (e.g. 06:00)"
+      AUTO_UPDATE=1
+      AUTO_UPDATE_TIME="$2"
+      shift 2
+      ;;
+    --no-auto-update)
+      AUTO_UPDATE=0
+      shift
+      ;;
+    --self-update)
+      ACTION="self-update"
+      shift
       ;;
     --non-interactive)
       NONINTERACTIVE=1
@@ -280,23 +301,154 @@ token_looks_configured() {
   esac
 }
 
+normalize_oncalendar() {
+  local raw="$1"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  [ -n "$raw" ] || err "auto-update time must not be empty"
+
+  if [[ "$raw" =~ ^([0-9]{1,2}):([0-9]{2})(:([0-9]{2}))?$ ]]; then
+    local hh=$((10#${BASH_REMATCH[1]}))
+    local mm=$((10#${BASH_REMATCH[2]}))
+    local ss=$((10#${BASH_REMATCH[4]:-0}))
+    if [ "$hh" -gt 23 ] || [ "$mm" -gt 59 ] || [ "$ss" -gt 59 ]; then
+      err "invalid auto-update time '$raw' (expected HH:MM in 00:00..23:59)"
+    fi
+    printf '*-*-* %02d:%02d:%02d\n' "$hh" "$mm" "$ss"
+    return 0
+  fi
+
+  if need systemd-analyze; then
+    systemd-analyze calendar "$raw" >/dev/null 2>&1 \
+      || err "invalid systemd OnCalendar specification: '$raw'"
+  fi
+  printf '%s\n' "$raw"
+}
+
+verify_venv_imports() {
+  "$INSTALL_DIR/.venv/bin/python" -I -c \
+    "import mivta.bot, mivta.config, mivta.database, mivta.translator" >/dev/null 2>&1
+}
+
+verify_env_config() {
+  local env_file="$1"
+  "$INSTALL_DIR/.venv/bin/python" -c '
+import sys
+from pathlib import Path
+from mivta.config import Config
+Config.from_env(env={}, dotenv_path=Path(sys.argv[1]))
+' "$env_file" >/dev/null
+}
+
+do_self_update() {
+  if [ "$NO_SYSTEMD" != "1" ] && ! is_root; then
+    err "--self-update requires root privileges (run with sudo)"
+  fi
+  [ -d "$INSTALL_DIR" ] || err "install directory $INSTALL_DIR does not exist"
+  [ -x "$INSTALL_DIR/.venv/bin/python" ] || err "virtualenv missing in $INSTALL_DIR/.venv"
+
+  local old_rev=""
+  local new_rev=""
+  local updated_code=0
+
+  if [ -d "$INSTALL_DIR/.git" ] && need git; then
+    old_rev="$(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
+    say "Checking for updates in $INSTALL_DIR (branch: $BRANCH)..."
+    if git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" fetch --depth 1 origin "$BRANCH"; then
+      new_rev="$(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" rev-parse FETCH_HEAD 2>/dev/null || true)"
+      if [ -n "$new_rev" ] && [ "$new_rev" != "$old_rev" ]; then
+        say "Updating mivta (${old_rev:0:7} -> ${new_rev:0:7})..."
+        git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" checkout -f FETCH_HEAD
+        [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
+        updated_code=1
+      else
+        say "Already up to date (${old_rev:0:7})."
+      fi
+    else
+      warn "git fetch failed; keeping current revision ${old_rev:0:7} and continuing to restart"
+    fi
+  else
+    warn "no git checkout in $INSTALL_DIR; skipping git fetch and continuing to restart"
+  fi
+
+  if [ "$updated_code" = "1" ]; then
+    say "Refreshing Python dependencies in $INSTALL_DIR/.venv..."
+    if ! (
+      "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt" &&
+      "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR" &&
+      verify_venv_imports
+    ); then
+      warn "updated revision ${new_rev:0:7} failed verification; rolling back to ${old_rev:0:7}"
+      if [ -n "$old_rev" ]; then
+        git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" checkout -f "$old_rev"
+        [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
+        "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR" || true
+      fi
+    fi
+
+    if [ "$NO_SYSTEMD" != "1" ] && is_root && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+      chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
+    fi
+    [ -f "$INSTALL_DIR/.env" ] && chmod 0600 "$INSTALL_DIR/.env"
+  fi
+
+  if [ "$NO_SYSTEMD" = "1" ]; then
+    say "Self-update complete (--no-systemd mode)."
+    return 0
+  fi
+
+  if [ ! -d /run/systemd/system ] || ! need systemctl; then
+    warn "systemd is not running as PID 1; skipping service restart"
+    return 0
+  fi
+
+  local env_file="$INSTALL_DIR/.env"
+  local current_tok
+  current_tok="$(get_env_var "$env_file" "BOT_TOKEN")"
+  if ! token_looks_configured "$current_tok"; then
+    warn "BOT_TOKEN is not configured in $env_file; skipping ${SERVICE_NAME}.service restart"
+    return 0
+  fi
+
+  verify_env_config "$env_file" \
+    || err "configuration in $env_file is invalid; refusing to restart ${SERVICE_NAME}.service"
+
+  say "Restarting ${SERVICE_NAME}.service..."
+  systemctl restart "${SERVICE_NAME}.service"
+  sleep 1
+  if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+    say "${SERVICE_NAME}.service is active and running."
+  else
+    err "${SERVICE_NAME}.service failed to start after restart; check: sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+  fi
+}
+
 do_uninstall() {
-  local unit_path="/etc/systemd/system/${SERVICE_NAME}.service"
+  local unit_path="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+  local upd_service_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.service"
+  local upd_timer_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.timer"
+
   if [ "$NO_SYSTEMD" != "1" ]; then
     is_root || err "--uninstall requires root privileges (run with sudo)"
     if [ -d /run/systemd/system ] && need systemctl; then
-      if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
-        say "Stopping and disabling ${SERVICE_NAME}.service..."
-        systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
-        systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true
-      fi
+      for unit in "${SERVICE_NAME}-update.timer" "${SERVICE_NAME}-update.service" "${SERVICE_NAME}.service"; do
+        if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+          say "Stopping and disabling ${unit}..."
+          systemctl stop "$unit" 2>/dev/null || true
+          systemctl disable "$unit" 2>/dev/null || true
+        fi
+      done
     fi
-    if [ -f "$unit_path" ]; then
-      rm -f "$unit_path"
-      if [ -d /run/systemd/system ] && need systemctl; then
-        systemctl daemon-reload
+    local removed_any=0
+    for f in "$upd_timer_path" "$upd_service_path" "$unit_path"; do
+      if [ -f "$f" ]; then
+        rm -f "$f"
+        say "Removed $f"
+        removed_any=1
       fi
-      say "Removed $unit_path"
+    done
+    if [ "$removed_any" = "1" ] && [ -d /run/systemd/system ] && need systemctl; then
+      systemctl daemon-reload
     fi
   fi
 
@@ -419,8 +571,60 @@ configure_env_file() {
   chmod 0600 "$env_file"
 }
 
+configure_auto_update_units() {
+  local on_calendar="$1"
+  local upd_service_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.service"
+  local upd_timer_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.timer"
+  mkdir -p "$SYSTEMD_DIR"
+
+  if [ "$AUTO_UPDATE" != "1" ]; then
+    if [ "$NO_SYSTEMD" != "1" ] && [ -d /run/systemd/system ] && need systemctl; then
+      systemctl stop "${SERVICE_NAME}-update.timer" 2>/dev/null || true
+      systemctl disable "${SERVICE_NAME}-update.timer" 2>/dev/null || true
+    fi
+    rm -f "$upd_timer_path" "$upd_service_path"
+    say "Auto-update timer disabled (--no-auto-update)."
+    return 0
+  fi
+
+  say "Writing auto-update & restart units (${on_calendar})..."
+  cat > "$upd_service_path" <<EOF
+[Unit]
+Description=Update and restart ${SERVICE_NAME} Telegram Translator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${INSTALL_DIR}
+Environment=MIVTA_SERVICE_NAME=${SERVICE_NAME}
+Environment=MIVTA_USER=${SERVICE_USER}
+Environment=MIVTA_BRANCH=${BRANCH}
+ExecStart=${INSTALL_DIR}/install.sh --self-update --dir ${INSTALL_DIR}
+TimeoutStartSec=300
+EOF
+  chmod 0644 "$upd_service_path"
+
+  cat > "$upd_timer_path" <<EOF
+[Unit]
+Description=Daily auto-update and scheduled restart timer for ${SERVICE_NAME}
+
+[Timer]
+OnCalendar=${on_calendar}
+AccuracySec=1min
+Persistent=true
+Unit=${SERVICE_NAME}-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 0644 "$upd_timer_path"
+}
+
 install_systemd_service() {
-  local unit_path="/etc/systemd/system/${SERVICE_NAME}.service"
+  local on_calendar="$1"
+  mkdir -p "$SYSTEMD_DIR"
+  local unit_path="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
   say "Writing systemd service unit $unit_path..."
   cat > "$unit_path" <<EOF
 [Unit]
@@ -448,14 +652,22 @@ WantedBy=multi-user.target
 EOF
   chmod 0644 "$unit_path"
 
+  configure_auto_update_units "$on_calendar"
+
   if [ ! -d /run/systemd/system ] || ! need systemctl; then
-    warn "systemd is not running as PID 1 on this host; unit file written, skipping systemctl start"
+    warn "systemd is not running as PID 1 on this host; unit files written, skipping systemctl start"
     say "Run manually with: ${INSTALL_DIR}/.venv/bin/python -m mivta"
     return 0
   fi
 
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}.service" >/dev/null
+  if [ "$AUTO_UPDATE" = "1" ]; then
+    systemctl enable --now "${SERVICE_NAME}-update.timer" >/dev/null
+    local tz_name
+    tz_name="$(timedatectl show -p Timezone --value 2>/dev/null || date +%Z)"
+    say "Enabled ${SERVICE_NAME}-update.timer (${on_calendar}, server timezone: ${tz_name})."
+  fi
 
   local env_file="$INSTALL_DIR/.env"
   local current_tok
@@ -463,12 +675,7 @@ EOF
 
   if token_looks_configured "$current_tok"; then
     # Verify configuration parses cleanly before starting/restarting the daemon
-    if ! "$INSTALL_DIR/.venv/bin/python" -c '
-import sys
-from pathlib import Path
-from mivta.config import Config
-Config.from_env(env={}, dotenv_path=Path(sys.argv[1]))
-' "$env_file" >/dev/null; then
+    if ! verify_env_config "$env_file"; then
       err "configuration in $env_file is invalid; fix it and run: sudo systemctl restart ${SERVICE_NAME}"
     fi
 
@@ -498,6 +705,16 @@ main() {
     exit 0
   fi
 
+  if [ "$ACTION" = "self-update" ]; then
+    do_self_update
+    exit 0
+  fi
+
+  local on_calendar=""
+  if [ "$AUTO_UPDATE" = "1" ]; then
+    on_calendar="$(normalize_oncalendar "$AUTO_UPDATE_TIME")"
+  fi
+
   if [ "$NO_SYSTEMD" != "1" ] && ! is_root; then
     err "system-wide Ubuntu install requires root privileges (re-run with sudo, or pass --no-systemd --dir ~/.local/share/mivta)"
   fi
@@ -514,6 +731,7 @@ main() {
   fi
 
   sync_source
+  [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
   mkdir -p "$INSTALL_DIR/data"
   chmod 0750 "$INSTALL_DIR/data"
 
@@ -524,10 +742,10 @@ main() {
   "$INSTALL_DIR/.venv/bin/pip" install -q --upgrade pip
   say "Installing Python dependencies..."
   "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
-  "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps "$INSTALL_DIR"
+  "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR"
 
   # Verify imports work on the target machine before wiring up the service
-  if ! "$INSTALL_DIR/.venv/bin/python" -c "import mivta.bot, mivta.config, mivta.database, mivta.translator" >/dev/null; then
+  if ! verify_venv_imports; then
     err "post-install verification failed: could not import mivta modules"
   fi
 
@@ -536,8 +754,12 @@ main() {
   if [ "$NO_SYSTEMD" != "1" ] && is_root; then
     chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
     chmod 0600 "$INSTALL_DIR/.env"
-    install_systemd_service
+    [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
+    install_systemd_service "$on_calendar"
   else
+    if [ -n "${MIVTA_SYSTEMD_DIR:-}" ]; then
+      configure_auto_update_units "$on_calendar"
+    fi
     say "Installed mivta into $INSTALL_DIR (--no-systemd mode)."
     say "Start with: (cd $INSTALL_DIR && $INSTALL_DIR/.venv/bin/python -m mivta)"
   fi
@@ -545,9 +767,10 @@ main() {
   printf '\nDone! Useful commands:\n'
   if [ "$NO_SYSTEMD" != "1" ]; then
     printf '  Status:   sudo systemctl status %s\n' "$SERVICE_NAME"
-    printf '  Logs:     sudo journalctl -u %s -f\n' "$SERVICE_NAME"
+    printf '  Timer:    sudo systemctl list-timers %s-update.timer\n' "$SERVICE_NAME"
+    printf '  Logs:     sudo journalctl -u %s -u %s-update -f\n' "$SERVICE_NAME" "$SERVICE_NAME"
     printf '  Config:   sudo nano %s/.env && sudo systemctl restart %s\n' "$INSTALL_DIR" "$SERVICE_NAME"
-    printf '  Upgrade:  curl -fsSL https://raw.githubusercontent.com/%s/%s/install.sh | sudo bash\n' "$REPO" "$BRANCH"
+    printf '  Upgrade:  sudo %s/install.sh --self-update\n' "$INSTALL_DIR"
   else
     printf '  Config:   nano %s/.env\n' "$INSTALL_DIR"
     printf '  Run:      (cd %s && %s/.venv/bin/python -m mivta)\n' "$INSTALL_DIR" "$INSTALL_DIR"
@@ -555,3 +778,4 @@ main() {
 }
 
 main "$@"
+exit 0
