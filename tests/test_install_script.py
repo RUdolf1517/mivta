@@ -309,3 +309,69 @@ def test_install_sh_auto_update_timer_units_and_rollback_safe_self_update(tmp_pa
     assert disable_res.returncode == 0, disable_res.stderr
     assert not timer_file.exists()
     assert not upd_svc_file.exists()
+
+
+def test_install_sh_privilege_separation_permissions(tmp_path: Path) -> None:
+    """Verify root:root (0755), root:mivta (0640), and mivta:mivta (0700) separation."""
+    install_dir = tmp_path / "opt-mivta"
+    (install_dir / "mivta").mkdir(parents=True)
+    (install_dir / ".venv" / "bin").mkdir(parents=True)
+    (install_dir / ".git").mkdir(parents=True)
+    (install_dir / "data").mkdir(parents=True)
+
+    # Seed permissive initial modes to ensure apply_install_permissions tightens them
+    (install_dir / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (install_dir / "install.sh").chmod(0o777)
+    (install_dir / "mivta" / "bot.py").write_text("x = 1\n", encoding="utf-8")
+    (install_dir / "mivta" / "bot.py").chmod(0o666)
+    (install_dir / ".venv" / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (install_dir / ".venv" / "bin" / "python").chmod(0o777)
+    (install_dir / "README.md").write_text("# doc\n", encoding="utf-8")
+    (install_dir / "README.md").chmod(0o666)
+    (install_dir / ".env").write_text("BOT_TOKEN=1:secret\n", encoding="utf-8")
+    (install_dir / ".env").chmod(0o666)
+    (install_dir / "data" / "mivta.db").write_text("db", encoding="utf-8")
+    (install_dir / "data" / "mivta.db").chmod(0o666)
+
+    chown_log = tmp_path / "chown.log"
+    # Extract apply_install_permissions from install.sh and run under simulated root + systemd
+    harness = tmp_path / "run_perms.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'INSTALL_DIR="{install_dir}"\n'
+        'SERVICE_USER="mivta"\n'
+        'NO_SYSTEMD="0"\n'
+        "is_root() { return 0; }\n"
+        "id() { return 0; }\n"
+        f'chown() {{ printf "%s\\n" "$*" >> "{chown_log}"; }}\n'
+        # Extract the exact function body from install.sh
+        f'eval "$(awk \'/^apply_install_permissions\\(\\)/,/^}}/\' "{INSTALL_SH}")"\n'
+        "apply_install_permissions\n",
+        encoding="utf-8",
+    )
+
+    res = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"stdout={res.stdout}\nstderr={res.stderr}"
+
+    logged = chown_log.read_text(encoding="utf-8").splitlines()
+    assert logged == [
+        f"-R root:root {install_dir}",
+        f"root:mivta {install_dir}/.env",
+        f"-R mivta:mivta {install_dir}/data",
+    ]
+
+    assert stat.S_IMODE(install_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((install_dir / "install.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((install_dir / "mivta" / "bot.py").stat().st_mode) == 0o644
+    assert stat.S_IMODE((install_dir / ".venv" / "bin" / "python").stat().st_mode) == 0o755
+    assert stat.S_IMODE((install_dir / "README.md").stat().st_mode) == 0o644
+    assert stat.S_IMODE((install_dir / ".git").stat().st_mode) == 0o700
+    assert stat.S_IMODE((install_dir / ".env").stat().st_mode) == 0o640
+    assert stat.S_IMODE((install_dir / "data").stat().st_mode) == 0o700
+    assert stat.S_IMODE((install_dir / "data" / "mivta.db").stat().st_mode) == 0o600

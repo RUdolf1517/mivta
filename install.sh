@@ -340,6 +340,38 @@ Config.from_env(env={}, dotenv_path=Path(sys.argv[1]))
 ' "$env_file" >/dev/null
 }
 
+# Enforce privilege separation across code, secrets, and runtime SQLite state:
+# - Code, .venv, and install.sh: root:root (0755/0644) so the unprivileged service
+#   user cannot tamper with files executed as root by mivta-update.service.
+# - .env: root:<service_user> (0640) in systemd mode (0600 in --no-systemd mode).
+# - data/: <service_user>:<service_user> (0700), DB files 0600.
+apply_install_permissions() {
+  mkdir -p "$INSTALL_DIR/data"
+  chmod 0755 "$INSTALL_DIR"
+  [ -d "$INSTALL_DIR/mivta" ] && chmod -R u+rwX,go+rX,go-w "$INSTALL_DIR/mivta"
+  [ -d "$INSTALL_DIR/.venv" ] && chmod -R u+rwX,go+rX,go-w "$INSTALL_DIR/.venv"
+  local doc_f
+  for doc_f in pyproject.toml requirements.txt .env.example LICENSE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md; do
+    [ -f "$INSTALL_DIR/$doc_f" ] && chmod 0644 "$INSTALL_DIR/$doc_f"
+  done
+  [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
+  [ -d "$INSTALL_DIR/.git" ] && chmod 0700 "$INSTALL_DIR/.git"
+  chmod 0700 "$INSTALL_DIR/data"
+  find "$INSTALL_DIR/data" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null || true
+
+  if [ "$NO_SYSTEMD" != "1" ] && is_root && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    chown -R root:root "$INSTALL_DIR"
+    if [ -f "$INSTALL_DIR/.env" ]; then
+      chown "root:${SERVICE_USER}" "$INSTALL_DIR/.env"
+      chmod 0640 "$INSTALL_DIR/.env"
+    fi
+    chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR/data"
+    chmod 0700 "$INSTALL_DIR/data"
+  else
+    [ -f "$INSTALL_DIR/.env" ] && chmod 0600 "$INSTALL_DIR/.env"
+  fi
+}
+
 do_self_update() {
   if [ "$NO_SYSTEMD" != "1" ] && ! is_root; then
     err "--self-update requires root privileges (run with sudo)"
@@ -385,12 +417,9 @@ do_self_update() {
         "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR" || true
       fi
     fi
-
-    if [ "$NO_SYSTEMD" != "1" ] && is_root && id -u "$SERVICE_USER" >/dev/null 2>&1; then
-      chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
-    fi
-    [ -f "$INSTALL_DIR/.env" ] && chmod 0600 "$INSTALL_DIR/.env"
   fi
+
+  apply_install_permissions
 
   if [ "$NO_SYSTEMD" = "1" ]; then
     say "Self-update complete (--no-systemd mode)."
@@ -479,7 +508,7 @@ sync_source() {
       say "Copying project files from $src_abs to $INSTALL_DIR..."
       rm -rf "$INSTALL_DIR/mivta"
       cp -R "$src_abs/mivta" "$INSTALL_DIR/mivta"
-      for f in pyproject.toml requirements.txt .env.example install.sh LICENSE README.md CHANGELOG.md; do
+      for f in pyproject.toml requirements.txt .env.example install.sh LICENSE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md; do
         [ -f "$src_abs/$f" ] && cp "$src_abs/$f" "$INSTALL_DIR/$f"
       done
       [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
@@ -641,6 +670,7 @@ EnvironmentFile=${INSTALL_DIR}/.env
 ExecStart=${INSTALL_DIR}/.venv/bin/python -m mivta
 Restart=on-failure
 RestartSec=5
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -730,10 +760,11 @@ main() {
     fi
   fi
 
+  umask 0022
   sync_source
   [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
   mkdir -p "$INSTALL_DIR/data"
-  chmod 0750 "$INSTALL_DIR/data"
+  chmod 0700 "$INSTALL_DIR/data"
 
   say "Setting up virtual environment in $INSTALL_DIR/.venv..."
   if [ ! -x "$INSTALL_DIR/.venv/bin/python" ]; then
@@ -750,11 +781,9 @@ main() {
   fi
 
   configure_env_file
+  apply_install_permissions
 
   if [ "$NO_SYSTEMD" != "1" ] && is_root; then
-    chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
-    chmod 0600 "$INSTALL_DIR/.env"
-    [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
     install_systemd_service "$on_calendar"
   else
     if [ -n "${MIVTA_SYSTEMD_DIR:-}" ]; then
