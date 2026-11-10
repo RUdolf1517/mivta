@@ -36,9 +36,17 @@ ARG_FALLBACK_PROVIDER="${TRANSLATOR_FALLBACK_PROVIDER:-}"
 ARG_GLOSSARY="${TRANSLATOR_GLOSSARY:-}"
 ARG_TARGET_LANG="${DEFAULT_TARGET_LANG:-}"
 ARG_SOURCE_LANG="${DEFAULT_SOURCE_LANG:-}"
+ARG_SWAP_LANG="${DEFAULT_SWAP_LANG:-}"
 ARG_STYLE="${DEFAULT_STYLE:-}"
+ARG_UI_LANG="${DEFAULT_UI_LANG:-}"
 ARG_INLINE_EXTRA_LANGS="${INLINE_EXTRA_LANGS:-}"
 ARG_INLINE_STYLE_VARIANTS="${INLINE_STYLE_VARIANTS:-}"
+ARG_INLINE_DEBOUNCE_MS="${INLINE_DEBOUNCE_MS:-}"
+ARG_WEBHOOK_URL="${WEBHOOK_URL:-}"
+ARG_WEBHOOK_SECRET="${WEBHOOK_SECRET_TOKEN:-}"
+ARG_WEBHOOK_HOST="${WEBHOOK_HOST:-}"
+ARG_WEBHOOK_PORT="${WEBHOOK_PORT:-}"
+ARG_WEBHOOK_PATH="${WEBHOOK_PATH:-}"
 
 say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'mivta-install: warning: %s\n' "$*" >&2; }
@@ -57,6 +65,10 @@ Options:
   --api-key <KEY>          TRANSLATOR_API_KEY (for openai / groq / gemini / openrouter / deepl)
   --api-url <URL>          Custom TRANSLATOR_API_URL
   --model <MODEL>          TRANSLATOR_MODEL for LLM provider
+  --swap-lang <CODE>       Bidirectional auto-swap language (e.g. ru, pl)
+  --webhook-url <HTTPS>    Enable Telegram Webhook mode (https://...)
+  --webhook-secret <SEC>   WEBHOOK_SECRET_TOKEN for X-Telegram-Bot-Api-Secret-Token
+  --webhook-port <PORT>    Local port for Webhook HTTP server (default: 8080)
   --dir <PATH>             Install directory (default: /opt/mivta)
   --branch <BRANCH>        Git branch or tag to install (default: main)
   --from-local [DIR]       Install from local checkout instead of cloning GitHub
@@ -104,6 +116,26 @@ while [ $# -gt 0 ]; do
     --model)
       [ $# -ge 2 ] || err "--model requires a value"
       ARG_MODEL="$2"
+      shift 2
+      ;;
+    --swap-lang)
+      [ $# -ge 2 ] || err "--swap-lang requires a value"
+      ARG_SWAP_LANG="$2"
+      shift 2
+      ;;
+    --webhook-url)
+      [ $# -ge 2 ] || err "--webhook-url requires an https:// URL"
+      ARG_WEBHOOK_URL="$2"
+      shift 2
+      ;;
+    --webhook-secret)
+      [ $# -ge 2 ] || err "--webhook-secret requires a value"
+      ARG_WEBHOOK_SECRET="$2"
+      shift 2
+      ;;
+    --webhook-port)
+      [ $# -ge 2 ] || err "--webhook-port requires a port number"
+      ARG_WEBHOOK_PORT="$2"
       shift 2
       ;;
     --dir)
@@ -556,9 +588,17 @@ configure_env_file() {
   [ -n "$ARG_GLOSSARY" ]              && set_env_var "$env_file" "TRANSLATOR_GLOSSARY" "$ARG_GLOSSARY"
   [ -n "$ARG_TARGET_LANG" ]           && set_env_var "$env_file" "DEFAULT_TARGET_LANG" "$ARG_TARGET_LANG"
   [ -n "$ARG_SOURCE_LANG" ]           && set_env_var "$env_file" "DEFAULT_SOURCE_LANG" "$ARG_SOURCE_LANG"
+  [ -n "$ARG_SWAP_LANG" ]             && set_env_var "$env_file" "DEFAULT_SWAP_LANG" "$ARG_SWAP_LANG"
   [ -n "$ARG_STYLE" ]                 && set_env_var "$env_file" "DEFAULT_STYLE" "$ARG_STYLE"
+  [ -n "$ARG_UI_LANG" ]               && set_env_var "$env_file" "DEFAULT_UI_LANG" "$ARG_UI_LANG"
   [ -n "$ARG_INLINE_EXTRA_LANGS" ]    && set_env_var "$env_file" "INLINE_EXTRA_LANGS" "$ARG_INLINE_EXTRA_LANGS"
   [ -n "$ARG_INLINE_STYLE_VARIANTS" ] && set_env_var "$env_file" "INLINE_STYLE_VARIANTS" "$ARG_INLINE_STYLE_VARIANTS"
+  [ -n "$ARG_INLINE_DEBOUNCE_MS" ]    && set_env_var "$env_file" "INLINE_DEBOUNCE_MS" "$ARG_INLINE_DEBOUNCE_MS"
+  [ -n "$ARG_WEBHOOK_URL" ]           && set_env_var "$env_file" "WEBHOOK_URL" "$ARG_WEBHOOK_URL"
+  [ -n "$ARG_WEBHOOK_SECRET" ]        && set_env_var "$env_file" "WEBHOOK_SECRET_TOKEN" "$ARG_WEBHOOK_SECRET"
+  [ -n "$ARG_WEBHOOK_HOST" ]          && set_env_var "$env_file" "WEBHOOK_HOST" "$ARG_WEBHOOK_HOST"
+  [ -n "$ARG_WEBHOOK_PORT" ]          && set_env_var "$env_file" "WEBHOOK_PORT" "$ARG_WEBHOOK_PORT"
+  [ -n "$ARG_WEBHOOK_PATH" ]          && set_env_var "$env_file" "WEBHOOK_PATH" "$ARG_WEBHOOK_PATH"
 
   local current_tok
   current_tok="$(get_env_var "$env_file" "BOT_TOKEN")"

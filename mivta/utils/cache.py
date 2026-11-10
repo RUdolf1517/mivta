@@ -24,6 +24,7 @@ def _make_key(provider: str, request: TranslationRequest) -> bytes:
         provider,
         request.source_lang,
         request.target_lang,
+        request.swap_lang,
         request.style.value,
         request.text,
     ):

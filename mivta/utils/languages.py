@@ -160,17 +160,162 @@ def normalize_detected_code(raw: str | None) -> str:
     return key
 
 
-def language_label(code: str) -> str:
-    """Human-readable label for settings UI (e.g. 'English (en)' or 'Авто (auto)')."""
+def language_label(code: str, *, ui_lang: str = "ru") -> str:
+    """Human-readable label for settings UI in Russian or English."""
+    is_en = ui_lang == "en"
     if code == AUTO_LANG:
-        return "Авто (auto)"
+        return "Auto (auto)" if is_en else "Авто (auto)"
     info = LANGUAGE_BY_CODE.get(code)
     if info is None:
         return code
-    return f"{info.russian_name} ({info.code})"
+    display = info.english_name if is_en else info.russian_name
+    return f"{display} ({info.code})"
+
+
+def language_name(code: str, *, ui_lang: str = "ru") -> str:
+    """Short localized language name without code suffix."""
+    if code == AUTO_LANG:
+        return "Auto" if ui_lang == "en" else "Авто"
+    info = LANGUAGE_BY_CODE.get(code)
+    if info is None:
+        return code
+    return info.english_name if ui_lang == "en" else info.russian_name
 
 
 def language_english_name(code: str) -> str:
     """English language name for LLM translation prompts."""
     info = LANGUAGE_BY_CODE.get(code)
     return info.english_name if info is not None else code
+
+
+_LANGUAGE_SCRIPTS: dict[str, str] = {
+    "en": "latin",
+    "de": "latin",
+    "fr": "latin",
+    "es": "latin",
+    "it": "latin",
+    "pt": "latin",
+    "pl": "latin",
+    "cs": "latin",
+    "nl": "latin",
+    "sv": "latin",
+    "tr": "latin",
+    "vi": "latin",
+    "id": "latin",
+    "az": "latin",
+    "ro": "latin",
+    "hu": "latin",
+    "fi": "latin",
+    "da": "latin",
+    "no": "latin",
+    "hr": "latin",
+    "sk": "latin",
+    "lt": "latin",
+    "lv": "latin",
+    "et": "latin",
+    "ru": "cyrillic",
+    "uk": "cyrillic",
+    "be": "cyrillic",
+    "kk": "cyrillic",
+    "bg": "cyrillic",
+    "he": "hebrew",
+    "ar": "arabic",
+    "fa": "arabic",
+    "zh": "cjk_kana",
+    "ja": "cjk_kana",
+    "ko": "hangul",
+    "hi": "devanagari",
+    "th": "thai",
+    "ka": "georgian",
+    "hy": "armenian",
+    "el": "greek",
+}
+
+
+def language_script(code: str) -> str | None:
+    """Return the primary script family for code, or None for multi-script languages."""
+    return _LANGUAGE_SCRIPTS.get(code)
+
+
+def _char_script(cp: int) -> str:
+    if (0x0041 <= cp <= 0x024F) or (0x1E00 <= cp <= 0x1EFF):
+        return "latin"
+    if 0x0400 <= cp <= 0x052F:
+        return "cyrillic"
+    if 0x0590 <= cp <= 0x05FF:
+        return "hebrew"
+    if (
+        (0x0600 <= cp <= 0x06FF)
+        or (0x0750 <= cp <= 0x077F)
+        or (0xFB50 <= cp <= 0xFDFF)
+        or (0xFE70 <= cp <= 0xFEFF)
+    ):
+        return "arabic"
+    if (
+        (0x3040 <= cp <= 0x30FF)
+        or (0x3400 <= cp <= 0x4DBF)
+        or (0x4E00 <= cp <= 0x9FFF)
+        or (0xF900 <= cp <= 0xFAFF)
+    ):
+        return "cjk_kana"
+    if (0xAC00 <= cp <= 0xD7AF) or (0x1100 <= cp <= 0x11FF) or (0x3130 <= cp <= 0x318F):
+        return "hangul"
+    if (0x0370 <= cp <= 0x03FF) or (0x1F00 <= cp <= 0x1FFF):
+        return "greek"
+    if (0x10A0 <= cp <= 0x10FF) or (0x2D00 <= cp <= 0x2D2F):
+        return "georgian"
+    if 0x0530 <= cp <= 0x058F:
+        return "armenian"
+    if 0x0900 <= cp <= 0x097F:
+        return "devanagari"
+    if 0x0E00 <= cp <= 0x0E7F:
+        return "thai"
+    return "other"
+
+
+def detect_single_script(text: str) -> str | None:
+    """Return the script family if all alphabetic chars in text share one script, else None."""
+    seen: str | None = None
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        sc = _char_script(ord(ch))
+        if seen is None:
+            seen = sc
+        elif seen != sc:
+            return None
+    return seen
+
+
+def resolve_auto_swap_target(
+    probe_text: str,
+    *,
+    source_lang: str,
+    target_lang: str,
+    swap_lang: str,
+    explicit_override: bool = False,
+) -> tuple[str, str]:
+    """Resolve `(effective_target, provider_swap_fallback)` for bidirectional auto-swap.
+
+    - Cross-script pairs (e.g. `en` <-> `ru`) flip immediately in 0 extra network calls.
+    - Same-script pairs (e.g. `en` <-> `pl`) preserve `provider_swap_fallback = swap_lang`
+      so the translator / pipeline swaps accurately using detected source language.
+    """
+    if (
+        explicit_override
+        or source_lang != AUTO_LANG
+        or not swap_lang
+        or swap_lang == target_lang
+    ):
+        return target_lang, ""
+
+    tgt_script = language_script(target_lang)
+    swap_script = language_script(swap_lang)
+    if tgt_script is not None and swap_script is not None and tgt_script != swap_script:
+        text_script = detect_single_script(probe_text)
+        if text_script == tgt_script:
+            return swap_lang, ""
+        if text_script is not None and text_script != tgt_script:
+            return target_lang, ""
+
+    return target_lang, swap_lang

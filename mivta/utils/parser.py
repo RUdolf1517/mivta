@@ -157,11 +157,24 @@ def _rebase_entities_from_map(
     return tuple(rebased)
 
 
+def _unknown_target_error(raw_tgt: str, ui_lang: str) -> str:
+    if ui_lang == "en":
+        return f"Unknown target language code: '{raw_tgt}'"
+    return f"Неизвестный код языка назначения: «{raw_tgt}»"
+
+
+def _unknown_source_error(raw_src: str, ui_lang: str) -> str:
+    if ui_lang == "en":
+        return f"Unknown source language code: '{raw_src}'"
+    return f"Неизвестный код исходного языка: «{raw_src}»"
+
+
 def _parse_directives(
     raw: str,
     *,
     allow_bare_gt: bool,
     entities: Sequence[MessageEntity] | None = None,
+    ui_lang: str = "ru",
 ) -> tuple[ParsedInlineQuery, bool]:
     """Shared parser returning (ParsedInlineQuery, saw_gt_trigger)."""
     sanitized, san_to_raw = _sanitize_with_map(raw)
@@ -218,7 +231,7 @@ def _parse_directives(
                     return (
                         ParsedInlineQuery(
                             text=err_text,
-                            error=f"Неизвестный код языка назначения: «{raw_tgt}»",
+                            error=_unknown_target_error(raw_tgt, ui_lang),
                         ),
                         True,
                     )
@@ -237,7 +250,7 @@ def _parse_directives(
                     return (
                         ParsedInlineQuery(
                             text=err_text,
-                            error=f"Неизвестный код исходного языка: «{raw_src}»",
+                            error=_unknown_source_error(raw_src, ui_lang),
                         ),
                         True,
                     )
@@ -247,7 +260,7 @@ def _parse_directives(
                     return (
                         ParsedInlineQuery(
                             text=err_text,
-                            error=f"Неизвестный код языка назначения: «{raw_tgt}»",
+                            error=_unknown_target_error(raw_tgt, ui_lang),
                         ),
                         True,
                     )
@@ -272,18 +285,25 @@ def _parse_directives(
     )
 
 
-def parse_inline_query(raw: str) -> ParsedInlineQuery:
+def parse_inline_query(raw: str, *, ui_lang: str = "ru") -> ParsedInlineQuery:
     """Parse optional inline overrides (`>lang`, `src>tgt`, `!style`) and body text."""
-    parsed, _ = _parse_directives(raw, allow_bare_gt=False)
+    parsed, _ = _parse_directives(raw, allow_bare_gt=False, ui_lang=ui_lang)
     return parsed
 
 
 def parse_business_query(
     raw: str,
     entities: Sequence[MessageEntity] | None = None,
+    *,
+    ui_lang: str = "ru",
 ) -> ParsedInlineQuery | None:
     """Parse Business Mode text; returns None unless triggered via `>`, `>lang`, or `src>tgt`."""
-    parsed, triggered = _parse_directives(raw, allow_bare_gt=True, entities=entities)
+    parsed, triggered = _parse_directives(
+        raw,
+        allow_bare_gt=True,
+        entities=entities,
+        ui_lang=ui_lang,
+    )
     if not triggered:
         return None
     return parsed
