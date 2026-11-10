@@ -44,6 +44,7 @@ git clone https://github.com/RUdolf1517/mivta.git
 cd mivta
 
 python3 -m venv .venv
+.venv/bin/pip install -U pip
 .venv/bin/pip install -r requirements.txt
 
 cp .env.example .env
@@ -201,6 +202,7 @@ sudo mkdir -p /opt/mivta
 sudo useradd --system --home-dir /opt/mivta --shell /usr/sbin/nologin mivta
 sudo git clone https://github.com/RUdolf1517/mivta.git /opt/mivta
 sudo python3 -m venv /opt/mivta/.venv
+sudo /opt/mivta/.venv/bin/pip install -U pip
 sudo /opt/mivta/.venv/bin/pip install -r /opt/mivta/requirements.txt
 sudo cp /opt/mivta/.env.example /opt/mivta/.env
 sudo chmod 600 /opt/mivta/.env
