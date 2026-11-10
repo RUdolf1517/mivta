@@ -63,3 +63,34 @@ async def test_database_rejects_invalid_languages() -> None:
             await db.update_user_settings(1, source_lang="invalid_code")
     finally:
         await db.close()
+
+
+async def test_database_business_connections(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "biz.db"))
+    await db.connect()
+    try:
+        assert await db.get_business_connection("bc-1") is None
+        saved = await db.upsert_business_connection(
+            "bc-1",
+            user_id=777,
+            user_chat_id=777,
+            can_reply=True,
+            is_enabled=True,
+        )
+        assert saved.can_reply is True
+        assert saved.is_enabled is True
+
+        updated = await db.upsert_business_connection(
+            "bc-1",
+            user_id=777,
+            user_chat_id=777,
+            can_reply=False,
+            is_enabled=False,
+        )
+        assert updated.can_reply is False
+        assert updated.is_enabled is False
+        fetched = await db.get_business_connection("bc-1")
+        assert fetched == updated
+    finally:
+        await db.close()
+

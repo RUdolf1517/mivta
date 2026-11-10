@@ -123,6 +123,12 @@ async def run_bot(config: Config) -> None:
                 "Inline Mode is NOT enabled for @%s! Enable it via @BotFather -> /setinline",
                 bot_username,
             )
+        if getattr(me, "has_topics_enabled", False):
+            logger.warning(
+                "Threaded Mode is enabled for @%s — disabling it in @BotFather is recommended "
+                "so /settings opens directly without topic threads.",
+                bot_username,
+            )
 
         with contextlib.suppress(Exception):
             await bot.set_my_commands(BOT_COMMANDS)
@@ -140,17 +146,26 @@ async def run_bot(config: Config) -> None:
             interval = max(5.0, min(60.0, config.cache_ttl / 2.0))
             janitor_task = asyncio.create_task(_cache_janitor(cache, interval))
 
+        business_enabled = bool(getattr(me, "can_connect_to_business", False))
         logger.info(
-            "Starting @%s (provider=%s, default=%s->%s, style=%s)",
+            "Starting @%s (provider=%s, default=%s->%s, style=%s, business_mode=%s)",
             bot_username,
             translator.name,
             config.default_source_lang,
             config.default_target_lang,
             config.default_style.value,
+            business_enabled,
         )
         await dp.start_polling(
             bot,
-            allowed_updates=["inline_query", "message", "callback_query"],
+            allowed_updates=[
+                "inline_query",
+                "message",
+                "callback_query",
+                "business_connection",
+                "business_message",
+                "edited_business_message",
+            ],
         )
     finally:
         if janitor_task is not None:

@@ -13,6 +13,7 @@ from mivta.utils.languages import (
 from mivta.utils.parser import (
     ParsedInlineQuery,
     has_translatable_text,
+    parse_business_query,
     parse_inline_query,
     sanitize_text,
     truncate_preview,
@@ -30,6 +31,7 @@ __all__ = [
     "language_english_name",
     "language_label",
     "normalize_detected_code",
+    "parse_business_query",
     "parse_inline_query",
     "resolve_language",
     "sanitize_text",

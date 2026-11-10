@@ -33,12 +33,12 @@ def _format_settings_text(settings: UserSettings, bot_username: str) -> str:
         f"• Исходный язык: {src_label}\n"
         f"• Язык перевода: {tgt_label}\n"
         f"• Стиль: {style_label}\n\n"
-        f"Использование в любом чате:\n"
-        f"@{bot_username} Привет, как дела?\n\n"
-        "Быстрые модификаторы прямо в строке ввода:\n"
-        f"• @{bot_username} >de текст — разовая смена языка\n"
-        f"• @{bot_username} ru>en текст — явная языковая пара\n"
-        f"• @{bot_username} !formal текст — стиль (neutral / casual / formal)"
+        "Inline Mode (любой чат):\n"
+        f"• @{bot_username} Привет, как дела?\n"
+        f"• @{bot_username} >de текст · ru>en текст · !formal текст\n\n"
+        "Telegram Business (личные чаты 1-на-1, без метки via @bot):\n"
+        "• > Привет, как дела?\n"
+        "• >de текст · ru>pl !formal текст"
     )
 
 

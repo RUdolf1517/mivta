@@ -1,4 +1,4 @@
-"""Asynchronous SQLite storage for persistent per-user preferences."""
+"""Asynchronous SQLite storage for persistent per-user preferences and Business metadata."""
 
 from __future__ import annotations
 
@@ -21,6 +21,15 @@ CREATE TABLE IF NOT EXISTS user_settings (
         CHECK (style IN ('neutral', 'casual', 'formal')),
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS business_connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    user_chat_id INTEGER NOT NULL,
+    can_reply INTEGER NOT NULL DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
@@ -34,8 +43,19 @@ class UserSettings:
     style: TranslationStyle
 
 
+@dataclass(frozen=True, slots=True)
+class BusinessConnectionRecord:
+    """Metadata of an active or inactive Telegram Business connection."""
+
+    connection_id: str
+    user_id: int
+    user_chat_id: int
+    can_reply: bool
+    is_enabled: bool
+
+
 class Database:
-    """Async SQLite repository storing strictly user settings (never message text)."""
+    """Async SQLite repository storing strictly user settings and connection metadata."""
 
     def __init__(
         self,
@@ -164,3 +184,75 @@ class Database:
                 target_lang=next_target,
                 style=next_style,
             )
+
+    async def upsert_business_connection(
+        self,
+        connection_id: str,
+        *,
+        user_id: int,
+        user_chat_id: int,
+        can_reply: bool,
+        is_enabled: bool,
+    ) -> BusinessConnectionRecord:
+        """Persist or update metadata for a Telegram Business connection."""
+        conn = self._require_conn()
+        now_ts = int(time.time())
+        async with self._write_lock:
+            await conn.execute(
+                """
+                INSERT INTO business_connections (
+                    connection_id, user_id, user_chat_id, can_reply, is_enabled, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    user_chat_id = excluded.user_chat_id,
+                    can_reply = excluded.can_reply,
+                    is_enabled = excluded.is_enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    connection_id,
+                    user_id,
+                    user_chat_id,
+                    int(can_reply),
+                    int(is_enabled),
+                    now_ts,
+                ),
+            )
+            await conn.commit()
+
+        return BusinessConnectionRecord(
+            connection_id=connection_id,
+            user_id=user_id,
+            user_chat_id=user_chat_id,
+            can_reply=can_reply,
+            is_enabled=is_enabled,
+        )
+
+    async def get_business_connection(
+        self,
+        connection_id: str,
+    ) -> BusinessConnectionRecord | None:
+        """Look up stored Business connection metadata by connection_id."""
+        conn = self._require_conn()
+        async with conn.execute(
+            """
+            SELECT connection_id, user_id, user_chat_id, can_reply, is_enabled
+            FROM business_connections
+            WHERE connection_id = ?
+            """,
+            (connection_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return BusinessConnectionRecord(
+            connection_id=str(row["connection_id"]),
+            user_id=int(row["user_id"]),
+            user_chat_id=int(row["user_chat_id"]),
+            can_reply=bool(row["can_reply"]),
+            is_enabled=bool(row["is_enabled"]),
+        )

@@ -17,6 +17,11 @@ from aiogram.types import (
 
 from mivta.config import Config
 from mivta.database import Database
+from mivta.handlers.pipeline import (
+    TELEGRAM_MAX_MESSAGE_LEN,
+    RateLimitedOutcome,
+    execute_translation,
+)
 from mivta.translator.base import (
     STYLE_LABELS_RU,
     TranslationRequest,
@@ -33,8 +38,6 @@ from mivta.utils.parser import has_translatable_text, parse_inline_query, trunca
 from mivta.utils.ratelimit import RateLimiter
 
 logger = logging.getLogger(__name__)
-
-TELEGRAM_MAX_MESSAGE_LEN = 4096
 
 
 def _article_id(kind: str, *parts: str) -> str:
@@ -99,21 +102,6 @@ def _translation_article(
             parse_mode=None,
         ),
     )
-
-
-def _inflight_key(provider: str, request: TranslationRequest) -> bytes:
-    hasher = hashlib.blake2b(digest_size=16)
-    for item in (
-        provider,
-        request.source_lang,
-        request.target_lang,
-        request.style.value,
-        request.text,
-    ):
-        encoded = item.encode("utf-8")
-        hasher.update(len(encoded).to_bytes(4, "big"))
-        hasher.update(encoded)
-    return hasher.digest()
 
 
 async def _safe_answer(
@@ -191,6 +179,13 @@ async def handle_inline_query(
         await _safe_answer(inline_query, [article], button=button, cache_time=1)
         return
 
+    request = TranslationRequest(
+        text=parsed.text,
+        source_lang=effective_source,
+        target_lang=effective_target,
+        style=effective_style,
+    )
+
     if not has_translatable_text(parsed.text):
         passthrough = TranslationResult(
             translated_text=parsed.text,
@@ -198,12 +193,6 @@ async def handle_inline_query(
             target_lang=effective_target,
             style=effective_style,
             provider=translator.name,
-        )
-        request = TranslationRequest(
-            text=parsed.text,
-            source_lang=effective_source,
-            target_lang=effective_target,
-            style=effective_style,
         )
         await _safe_answer(
             inline_query,
@@ -213,49 +202,16 @@ async def handle_inline_query(
         )
         return
 
-    request = TranslationRequest(
-        text=parsed.text,
-        source_lang=effective_source,
-        target_lang=effective_target,
-        style=effective_style,
-    )
-
-    cached = cache.get(translator.name, request)
-    if cached is not None:
-        await _safe_answer(
-            inline_query,
-            [_translation_article(request, cached)],
-            button=button,
-            cache_time=5,
-        )
-        return
-
-    allowed, retry_after = rate_limiter.allow(user_id)
-    if not allowed:
-        article = _status_article(
-            "ratelimit",
-            title="Слишком много запросов",
-            description=f"Подождите {retry_after:.1f} с и продолжите ввод",
-            fallback_text=parsed.text,
-        )
-        await _safe_answer(inline_query, [article], button=button, cache_time=0)
-        return
-
-    flight_key = _inflight_key(translator.name, request)
-    task = inflight.get(flight_key)
-    created_task = False
-    if task is None:
-
-        async def _run_translation() -> TranslationResult:
-            async with concurrency_sem:
-                return await translator.translate(request)
-
-        task = asyncio.create_task(_run_translation())
-        inflight[flight_key] = task
-        created_task = True
-
     try:
-        result = await asyncio.shield(task)
+        outcome = await execute_translation(
+            user_id=user_id,
+            request=request,
+            translator=translator,
+            cache=cache,
+            rate_limiter=rate_limiter,
+            concurrency_sem=concurrency_sem,
+            inflight=inflight,
+        )
     except TranslatorTimeoutError:
         logger.warning("Translator timed out (provider=%s)", translator.name)
         article = _status_article(
@@ -296,16 +252,20 @@ async def handle_inline_query(
         )
         await _safe_answer(inline_query, [article], button=button, cache_time=0)
         return
-    finally:
-        if created_task:
-            inflight.pop(flight_key, None)
 
-    if created_task:
-        cache.set(translator.name, request, result)
+    if isinstance(outcome, RateLimitedOutcome):
+        article = _status_article(
+            "ratelimit",
+            title="Слишком много запросов",
+            description=f"Подождите {outcome.retry_after:.1f} с и продолжите ввод",
+            fallback_text=parsed.text,
+        )
+        await _safe_answer(inline_query, [article], button=button, cache_time=0)
+        return
 
     await _safe_answer(
         inline_query,
-        [_translation_article(request, result)],
+        [_translation_article(request, outcome)],
         button=button,
         cache_time=5,
     )
@@ -316,4 +276,3 @@ def build_inline_router() -> Router:
     router = Router(name="inline")
     router.inline_query.register(handle_inline_query)
     return router
-
