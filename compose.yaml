@@ -1,0 +1,13 @@
+services:
+  mivta:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/mivta.db
+    volumes:
+      - mivta-data:/app/data
+
+volumes:
+  mivta-data:
