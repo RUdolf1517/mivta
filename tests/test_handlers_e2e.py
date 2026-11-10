@@ -19,6 +19,8 @@ from aiogram.methods import (
     TelegramMethod,
 )
 from aiogram.types import (
+    BusinessBotRights,
+    BusinessConnection,
     CallbackQuery,
     Chat,
     InlineQuery,
@@ -163,6 +165,49 @@ def _callback_update(update_id: int, data: str, uid: int = 777) -> Update:
             data=data,
         ),
     )
+
+
+def _business_conn_update(
+    update_id: int,
+    conn_id: str = "bc-100",
+    owner_uid: int = 777,
+    *,
+    can_reply: bool = True,
+    is_enabled: bool = True,
+) -> Update:
+    return Update(
+        update_id=update_id,
+        business_connection=BusinessConnection(
+            id=conn_id,
+            user=_user(owner_uid),
+            user_chat_id=owner_uid,
+            date=dt.datetime.now(dt.UTC),
+            is_enabled=is_enabled,
+            rights=BusinessBotRights(can_reply=can_reply),
+        ),
+    )
+
+
+def _business_msg_update(
+    update_id: int,
+    text: str,
+    *,
+    conn_id: str = "bc-100",
+    sender_uid: int = 777,
+    interlocutor_chat_id: int = 999,
+    edited: bool = False,
+) -> Update:
+    msg = Message(
+        message_id=update_id,
+        date=dt.datetime.now(dt.UTC),
+        chat=Chat(id=interlocutor_chat_id, type="private"),
+        from_user=_user(sender_uid),
+        business_connection_id=conn_id,
+        text=text,
+    )
+    if edited:
+        return Update(update_id=update_id, edited_business_message=msg)
+    return Update(update_id=update_id, business_message=msg)
 
 
 @pytest.fixture
@@ -354,6 +399,81 @@ async def test_direct_messages_are_not_translated(harness) -> None:
     assert isinstance(reply, SendMessage)
     assert "Inline Mode" in reply.text
     assert "@mivta_bot" in reply.text
+
+
+async def test_business_mode_translates_outgoing_in_place_without_via_bot(harness) -> None:
+    dp, bot, session, _, translator, _, _ = harness
+
+    # 1. Connect Business account (owner=777)
+    await dp.feed_update(bot, _business_conn_update(70, conn_id="bc-live", owner_uid=777))
+    assert isinstance(session.calls[-1], SendMessage)
+    assert session.calls[-1].chat_id == 777
+    session.calls.clear()
+
+    # 2. Normal outgoing message without `>` -> completely untouched
+    await dp.feed_update(
+        bot,
+        _business_msg_update(71, "Обычное сообщение другу", conn_id="bc-live"),
+    )
+    assert len(translator.requests) == 0
+    assert len(session.calls) == 0
+
+    # 3. Incoming message from interlocutor (sender_uid == interlocutor_chat_id == 999)
+    #    even with `>` prefix -> completely untouched!
+    await dp.feed_update(
+        bot,
+        _business_msg_update(
+            72,
+            "> Привет, как дела?",
+            conn_id="bc-live",
+            sender_uid=999,
+            interlocutor_chat_id=999,
+        ),
+    )
+    assert len(translator.requests) == 0
+    assert len(session.calls) == 0
+
+    # 4. Outgoing message from owner with `>` -> edited in-place via EditMessageText!
+    await dp.feed_update(
+        bot,
+        _business_msg_update(73, "> Привет, как дела?", conn_id="bc-live"),
+    )
+    assert len(translator.requests) == 1
+    assert len(session.calls) == 1
+    edit_call = session.calls[0]
+    assert isinstance(edit_call, EditMessageText)
+    assert edit_call.business_connection_id == "bc-live"
+    assert edit_call.chat_id == 999
+    assert edit_call.message_id == 73
+    assert edit_call.text == "Hello, how are you?"
+    assert edit_call.parse_mode is None
+
+    # 5. Edited business message with `>de !formal` -> edited in-place with German formal!
+    session.calls.clear()
+    await dp.feed_update(
+        bot,
+        _business_msg_update(
+            74,
+            ">de !formal Привет, как дела?",
+            conn_id="bc-live",
+            edited=True,
+        ),
+    )
+    assert isinstance(session.calls[-1], EditMessageText)
+    assert session.calls[-1].text == "[formal] Hello, how are you? (de)"
+
+    # 6. Upstream error in Business Mode -> NEVER overwrites interlocutor chat, notifies owner DM
+    session.calls.clear()
+    translator.fail_with = TranslatorUnavailableError("upstream down")
+    await dp.feed_update(
+        bot,
+        _business_msg_update(75, "> Новая фраза для теста сбоя", conn_id="bc-live"),
+    )
+    assert all(not isinstance(c, EditMessageText) for c in session.calls)
+    assert len(session.calls) == 1
+    assert isinstance(session.calls[0], SendMessage)
+    assert session.calls[0].chat_id == 777
+
 
 
 def test_translator_package_is_independent_of_telegram_and_sqlite() -> None:

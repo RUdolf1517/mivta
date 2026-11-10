@@ -6,6 +6,7 @@ from mivta.translator.base import TranslationStyle
 from mivta.utils.languages import normalize_detected_code, resolve_language
 from mivta.utils.parser import (
     has_translatable_text,
+    parse_business_query,
     parse_inline_query,
     sanitize_text,
     truncate_preview,
@@ -131,3 +132,45 @@ def test_truncate_preview() -> None:
     preview = truncate_preview(long_text, limit=20)
     assert len(preview) == 20
     assert preview.endswith("…")
+
+
+def test_parse_business_query_triggers_and_ignores_normal_messages() -> None:
+    # Plain chat messages must return None (untouched)
+    assert parse_business_query("Привет, как дела?") is None
+    assert parse_business_query("a > b") is None
+    assert parse_business_query("!formal без знака больше") is None
+    assert parse_business_query(">> двойная скобка") is None
+
+    # Bare `>` uses user defaults
+    b1 = parse_business_query("> Привет, как дела?")
+    assert b1 is not None
+    assert b1.text == "Привет, как дела?"
+    assert b1.source_lang is None
+    assert b1.target_lang is None
+    assert b1.style is None
+    assert b1.error is None
+
+    # Bare `>` + style + multiline
+    b2 = parse_business_query("> !formal Добрый день!\nКак проект?")
+    assert b2 is not None
+    assert b2.style == TranslationStyle.FORMAL
+    assert b2.text == "Добрый день!\nКак проект?"
+
+    # Language & pair overrides
+    b3 = parse_business_query(">de !casual Ну привет!")
+    assert b3 is not None
+    assert b3.target_lang == "de"
+    assert b3.style == TranslationStyle.CASUAL
+    assert b3.text == "Ну привет!"
+
+    b4 = parse_business_query("ru>pl Добрый вечер")
+    assert b4 is not None
+    assert b4.source_lang == "ru"
+    assert b4.target_lang == "pl"
+    assert b4.text == "Добрый вечер"
+
+    # Unknown language code triggers error
+    b_err = parse_business_query(">zz Привет")
+    assert b_err is not None
+    assert b_err.error is not None
+
