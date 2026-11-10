@@ -116,7 +116,7 @@ class Database:
 
     def __init__(
         self,
-        path: str = "data/mivta.db",
+        path: str | Path = "data/mivta.db",
         *,
         default_source_lang: str = "auto",
         default_target_lang: str = "en",
@@ -124,7 +124,7 @@ class Database:
         default_style: TranslationStyle = TranslationStyle.NEUTRAL,
         default_extra_langs: Sequence[str] = (),
     ) -> None:
-        self._path = path
+        self._path = str(path)
         self._default_source = default_source_lang
         self._default_target = default_target_lang
         self._default_swap = _normalize_swap_lang_input(default_swap_lang)

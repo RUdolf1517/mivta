@@ -128,13 +128,21 @@ def create_dispatcher(
     dp = Dispatcher()
     dp.include_router(build_root_router())
 
-    resolved_cache = cache or TranslationCache(
-        max_size=config.cache_max_size,
-        ttl_seconds=config.cache_ttl,
+    resolved_cache = (
+        cache
+        if cache is not None
+        else TranslationCache(
+            max_size=config.cache_max_size,
+            ttl_seconds=config.cache_ttl,
+        )
     )
-    resolved_limiter = rate_limiter or RateLimiter(
-        rate_per_minute=config.rate_limit_per_minute,
-        burst=config.rate_limit_burst,
+    resolved_limiter = (
+        rate_limiter
+        if rate_limiter is not None
+        else RateLimiter(
+            rate_per_minute=config.rate_limit_per_minute,
+            burst=config.rate_limit_burst,
+        )
     )
     inflight: dict[bytes, InflightEntry] = {}
     inline_active: dict[int, tuple[int, asyncio.Task[Any]]] = {}
