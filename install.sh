@@ -29,9 +29,13 @@ ARG_PROVIDER="${TRANSLATOR_PROVIDER:-}"
 ARG_API_KEY="${TRANSLATOR_API_KEY:-}"
 ARG_API_URL="${TRANSLATOR_API_URL:-}"
 ARG_MODEL="${TRANSLATOR_MODEL:-}"
+ARG_FALLBACK_PROVIDER="${TRANSLATOR_FALLBACK_PROVIDER:-}"
+ARG_GLOSSARY="${TRANSLATOR_GLOSSARY:-}"
 ARG_TARGET_LANG="${DEFAULT_TARGET_LANG:-}"
 ARG_SOURCE_LANG="${DEFAULT_SOURCE_LANG:-}"
 ARG_STYLE="${DEFAULT_STYLE:-}"
+ARG_INLINE_EXTRA_LANGS="${INLINE_EXTRA_LANGS:-}"
+ARG_INLINE_STYLE_VARIANTS="${INLINE_STYLE_VARIANTS:-}"
 
 say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'mivta-install: warning: %s\n' "$*" >&2; }
@@ -46,10 +50,10 @@ Automated Ubuntu/Debian installer and upgrader for mivta.
 
 Options:
   --token <TOKEN>          Telegram BOT_TOKEN from @BotFather
-  --provider <NAME>        google | openai | deepl | libretranslate
-  --api-key <KEY>          TRANSLATOR_API_KEY (for openai / deepl / libretranslate)
+  --provider <NAME>        google | openai | groq | gemini | openrouter | deepl | libretranslate
+  --api-key <KEY>          TRANSLATOR_API_KEY (for openai / groq / gemini / openrouter / deepl)
   --api-url <URL>          Custom TRANSLATOR_API_URL
-  --model <MODEL>          TRANSLATOR_MODEL for openai provider
+  --model <MODEL>          TRANSLATOR_MODEL for LLM provider
   --dir <PATH>             Install directory (default: /opt/mivta)
   --branch <BRANCH>        Git branch or tag to install (default: main)
   --from-local [DIR]       Install from local checkout instead of cloning GitHub
@@ -61,7 +65,9 @@ Options:
 
 Environment variables:
   BOT_TOKEN, TRANSLATOR_PROVIDER, TRANSLATOR_API_KEY, TRANSLATOR_API_URL,
-  TRANSLATOR_MODEL, DEFAULT_TARGET_LANG, DEFAULT_SOURCE_LANG, DEFAULT_STYLE,
+  TRANSLATOR_MODEL, TRANSLATOR_FALLBACK_PROVIDER, TRANSLATOR_GLOSSARY,
+  DEFAULT_TARGET_LANG, DEFAULT_SOURCE_LANG, DEFAULT_STYLE,
+  INLINE_EXTRA_LANGS, INLINE_STYLE_VARIANTS,
   MIVTA_INSTALL_DIR, MIVTA_USER, MIVTA_REPO, MIVTA_BRANCH, MIVTA_NONINTERACTIVE=1
 EOF
 }
@@ -321,7 +327,7 @@ sync_source() {
       say "Copying project files from $src_abs to $INSTALL_DIR..."
       rm -rf "$INSTALL_DIR/mivta"
       cp -R "$src_abs/mivta" "$INSTALL_DIR/mivta"
-      for f in pyproject.toml requirements.txt .env.example install.sh LICENSE README.md; do
+      for f in pyproject.toml requirements.txt .env.example install.sh LICENSE README.md CHANGELOG.md; do
         [ -f "$src_abs/$f" ] && cp "$src_abs/$f" "$INSTALL_DIR/$f"
       done
       [ -f "$INSTALL_DIR/install.sh" ] && chmod 0755 "$INSTALL_DIR/install.sh"
@@ -360,14 +366,18 @@ configure_env_file() {
 
   set_env_var "$env_file" "DATABASE_PATH" "${INSTALL_DIR}/data/mivta.db"
 
-  [ -n "$ARG_BOT_TOKEN" ]   && set_env_var "$env_file" "BOT_TOKEN" "$ARG_BOT_TOKEN"
-  [ -n "$ARG_PROVIDER" ]    && set_env_var "$env_file" "TRANSLATOR_PROVIDER" "$ARG_PROVIDER"
-  [ -n "$ARG_API_KEY" ]     && set_env_var "$env_file" "TRANSLATOR_API_KEY" "$ARG_API_KEY"
-  [ -n "$ARG_API_URL" ]     && set_env_var "$env_file" "TRANSLATOR_API_URL" "$ARG_API_URL"
-  [ -n "$ARG_MODEL" ]       && set_env_var "$env_file" "TRANSLATOR_MODEL" "$ARG_MODEL"
-  [ -n "$ARG_TARGET_LANG" ] && set_env_var "$env_file" "DEFAULT_TARGET_LANG" "$ARG_TARGET_LANG"
-  [ -n "$ARG_SOURCE_LANG" ] && set_env_var "$env_file" "DEFAULT_SOURCE_LANG" "$ARG_SOURCE_LANG"
-  [ -n "$ARG_STYLE" ]       && set_env_var "$env_file" "DEFAULT_STYLE" "$ARG_STYLE"
+  [ -n "$ARG_BOT_TOKEN" ]             && set_env_var "$env_file" "BOT_TOKEN" "$ARG_BOT_TOKEN"
+  [ -n "$ARG_PROVIDER" ]              && set_env_var "$env_file" "TRANSLATOR_PROVIDER" "$ARG_PROVIDER"
+  [ -n "$ARG_API_KEY" ]               && set_env_var "$env_file" "TRANSLATOR_API_KEY" "$ARG_API_KEY"
+  [ -n "$ARG_API_URL" ]               && set_env_var "$env_file" "TRANSLATOR_API_URL" "$ARG_API_URL"
+  [ -n "$ARG_MODEL" ]                 && set_env_var "$env_file" "TRANSLATOR_MODEL" "$ARG_MODEL"
+  [ -n "$ARG_FALLBACK_PROVIDER" ]     && set_env_var "$env_file" "TRANSLATOR_FALLBACK_PROVIDER" "$ARG_FALLBACK_PROVIDER"
+  [ -n "$ARG_GLOSSARY" ]              && set_env_var "$env_file" "TRANSLATOR_GLOSSARY" "$ARG_GLOSSARY"
+  [ -n "$ARG_TARGET_LANG" ]           && set_env_var "$env_file" "DEFAULT_TARGET_LANG" "$ARG_TARGET_LANG"
+  [ -n "$ARG_SOURCE_LANG" ]           && set_env_var "$env_file" "DEFAULT_SOURCE_LANG" "$ARG_SOURCE_LANG"
+  [ -n "$ARG_STYLE" ]                 && set_env_var "$env_file" "DEFAULT_STYLE" "$ARG_STYLE"
+  [ -n "$ARG_INLINE_EXTRA_LANGS" ]    && set_env_var "$env_file" "INLINE_EXTRA_LANGS" "$ARG_INLINE_EXTRA_LANGS"
+  [ -n "$ARG_INLINE_STYLE_VARIANTS" ] && set_env_var "$env_file" "INLINE_STYLE_VARIANTS" "$ARG_INLINE_STYLE_VARIANTS"
 
   local current_tok
   current_tok="$(get_env_var "$env_file" "BOT_TOKEN")"
@@ -385,7 +395,7 @@ configure_env_file() {
     fi
 
     if [ -z "$ARG_PROVIDER" ]; then
-      printf 'Translator provider [google/openai/deepl/libretranslate] (default: google): ' >/dev/tty
+      printf 'Translator provider [google/openai/groq/gemini/openrouter/deepl/libretranslate] (default: google): ' >/dev/tty
       local input_prov=""
       IFS= read -r input_prov </dev/tty || true
       input_prov="${input_prov#"${input_prov%%[![:space:]]*}"}"
@@ -393,7 +403,7 @@ configure_env_file() {
       if [ -n "$input_prov" ]; then
         set_env_var "$env_file" "TRANSLATOR_PROVIDER" "$input_prov"
         case "$input_prov" in
-          openai|deepl)
+          openai|groq|gemini|openrouter|deepl)
             printf 'Enter TRANSLATOR_API_KEY for %s: ' "$input_prov" >/dev/tty
             local input_key=""
             IFS= read -r input_key </dev/tty || true

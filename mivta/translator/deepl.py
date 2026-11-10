@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -24,12 +25,14 @@ _DEEPL_FORMALITY: dict[TranslationStyle, str] = {
     TranslationStyle.CASUAL: "prefer_less",
     TranslationStyle.FORMAL: "prefer_more",
 }
+_XML_STYLE_TAG_RE = re.compile(r"<s\d+>")
 
 
 class DeepLTranslator(Translator):
     """Translator backed by DeepL API v2 with native formality support."""
 
     name = "deepl"
+    supports_styles = True
 
     def __init__(
         self,
@@ -68,6 +71,8 @@ class DeepLTranslator(Translator):
             "preserve_formatting": True,
             "formality": _DEEPL_FORMALITY[request.style],
         }
+        if _XML_STYLE_TAG_RE.search(request.text):
+            payload["tag_handling"] = "xml"
         if request.source_lang != "auto":
             payload["source_lang"] = request.source_lang.upper()
 

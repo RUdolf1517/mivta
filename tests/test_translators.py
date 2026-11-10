@@ -9,6 +9,7 @@ import pytest
 
 from mivta.translator import (
     DeepLTranslator,
+    FallbackTranslator,
     GoogleTranslator,
     InvalidTranslationRequestError,
     LibreTranslateTranslator,
@@ -20,6 +21,7 @@ from mivta.translator import (
     TranslatorRateLimitError,
     TranslatorTimeoutError,
     TranslatorUnavailableError,
+    create_translator,
 )
 
 
@@ -200,3 +202,122 @@ async def test_timeout_and_length_validation() -> None:
             )
         with pytest.raises(TranslatorTimeoutError):
             await translator.translate(TranslationRequest(text="Привет", target_lang="en"))
+
+
+async def test_llm_presets_glossary_and_single_call_multistyle_batch() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        calls.append((str(request.url), body))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "```json\n"
+                                '{"neutral": "Deploy mivta now",'
+                                ' "casual": "Ship mivta now",'
+                                ' "formal": "Please deploy mivta now"}\n'
+                                "```"
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = create_translator(
+            "groq",
+            client,
+            api_key="gsk_test",
+            glossary=("mivta", "Kubernetes"),
+        )
+        assert translator.name == "groq"
+        assert translator.supports_styles is True
+        assert translator.uses_llm_glossary is True
+
+        results = await translator.translate_styles(
+            TranslationRequest(text="Задеплой mivta сейчас", target_lang="en"),
+            [TranslationStyle.NEUTRAL, TranslationStyle.CASUAL, TranslationStyle.FORMAL],
+        )
+
+    # All 3 style registers resolved in a SINGLE HTTP request to Groq's endpoint!
+    assert len(calls) == 1
+    url, payload = calls[0]
+    assert url == "https://api.groq.com/openai/v1/chat/completions"
+    assert payload["model"] == "llama-3.3-70b-versatile"
+    assert "mivta, Kubernetes" in payload["messages"][0]["content"]
+    assert [r.style for r in results] == [
+        TranslationStyle.NEUTRAL,
+        TranslationStyle.CASUAL,
+        TranslationStyle.FORMAL,
+    ]
+    assert [r.translated_text for r in results] == [
+        "Deploy mivta now",
+        "Ship mivta now",
+        "Please deploy mivta now",
+    ]
+
+
+async def test_deepl_enables_xml_tag_handling_when_style_tags_present() -> None:
+    seen_body: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "translations": [
+                    {"detected_source_language": "RU", "text": "<s0>Important</s0>"}
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        translator = DeepLTranslator(client, api_key="key:fx")
+        res = await translator.translate(
+            TranslationRequest(text="<s0>Важно</s0>", target_lang="en")
+        )
+    assert seen_body["tag_handling"] == "xml"
+    assert res.translated_text == "<s0>Important</s0>"
+
+
+async def test_fallback_translator_recovers_on_429_and_400_but_not_local_validation() -> None:
+    hit_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        hit_urls.append(url)
+        if "groq.com" in url:
+            return httpx.Response(429, text="rate limited")
+        return httpx.Response(
+            200,
+            json={"sentences": [{"trans": "Fallback translation"}], "src": "ru"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chain = create_translator(
+            "groq",
+            client,
+            api_key="gsk_key",
+            max_length=20,
+            fallback_providers=("google",),
+        )
+        assert isinstance(chain, FallbackTranslator)
+        assert chain.name == "groq->google"
+        assert chain.uses_llm_glossary is False
+
+        # 1. Local TextTooLongError rejects immediately with zero network calls
+        with pytest.raises(TextTooLongError):
+            await chain.translate(TranslationRequest(text="X" * 25, target_lang="en"))
+        assert len(hit_urls) == 0
+
+        # 2. Primary 429 transparently falls back to Google
+        result = await chain.translate(TranslationRequest(text="Привет", target_lang="en"))
+        assert result.translated_text == "Fallback translation"
+        assert result.provider == "google"
+        assert len(hit_urls) == 2

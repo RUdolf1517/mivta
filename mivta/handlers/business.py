@@ -1,4 +1,4 @@
-"""Telegram Business Mode handlers — in-place translation without `via @bot`."""
+"""Telegram Business / Secretary Mode handlers — in-place text & caption translation."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from aiogram.types import BusinessConnection, Message
 from mivta.config import Config
 from mivta.database import BusinessConnectionRecord, Database
 from mivta.handlers.pipeline import (
+    TELEGRAM_MAX_CAPTION_LEN,
     TELEGRAM_MAX_MESSAGE_LEN,
     RateLimitedOutcome,
     execute_translation,
@@ -24,6 +25,7 @@ from mivta.translator.base import (
     TranslatorError,
 )
 from mivta.utils.cache import TranslationCache
+from mivta.utils.formatting import prepare_text_for_translation, restore_formatted_text
 from mivta.utils.parser import has_translatable_text, parse_business_query
 from mivta.utils.ratelimit import RateLimiter
 
@@ -104,9 +106,9 @@ async def handle_business_connection(
     await _notify_owner_privately(
         bot,
         connection.user_chat_id,
-        "mivta подключён к Telegram Business.\n\n"
+        "mivta подключён к Telegram Business / Автоматизации чатов.\n\n"
         "Чтобы отправить перевод без метки via @bot в личном чате, "
-        "начните сообщение с символа «>»:\n"
+        "начните сообщение или подпись к фото/файлу с символа «>»:\n"
         "• > Привет, как дела? — перевод по вашим настройкам (/settings)\n"
         "• >de Привет, мир! — разовая смена языка\n"
         "• ru>pl !formal Добрый день — пара языков и стиль\n\n"
@@ -125,9 +127,13 @@ async def handle_business_message(
     concurrency_sem: asyncio.Semaphore,
     inflight: dict[bytes, asyncio.Task[TranslationResult]],
 ) -> None:
-    """Translate outgoing owner messages prefixed with `>` in-place via editMessageText."""
+    """Translate outgoing owner text or media captions prefixed with `>` in-place."""
     conn_id = message.business_connection_id
-    if not conn_id or not message.text or message.from_user is None:
+    is_caption = message.text is None and message.caption is not None
+    raw_content = message.text if not is_caption else message.caption
+    raw_entities = message.entities if not is_caption else message.caption_entities
+
+    if not conn_id or not raw_content or message.from_user is None:
         return
     if message.sender_business_bot is not None or message.from_user.is_bot:
         return
@@ -136,7 +142,7 @@ async def handle_business_message(
     if message.from_user.id == message.chat.id:
         return
 
-    parsed = parse_business_query(message.text)
+    parsed = parse_business_query(raw_content, entities=raw_entities)
     if parsed is None:
         return
 
@@ -150,7 +156,7 @@ async def handle_business_message(
             await _notify_owner_privately(
                 bot,
                 user_chat_id,
-                "Нет права «Отвечать на сообщения» в настройках Telegram Business — "
+                "Нет права «Отвечать на сообщения» в настройках Автоматизации чатов — "
                 "сообщение не может быть заменено переводом.",
             )
             return
@@ -163,11 +169,15 @@ async def handle_business_message(
     if not parsed.text:
         return
 
-    if len(parsed.text) > config.max_text_length:
+    max_allowed = min(
+        config.max_text_length,
+        TELEGRAM_MAX_CAPTION_LEN if is_caption else TELEGRAM_MAX_MESSAGE_LEN,
+    )
+    if len(parsed.text) > max_allowed:
         await _notify_owner_privately(
             bot,
             user_chat_id,
-            f"mivta: текст слишком длинный ({len(parsed.text)} / {config.max_text_length} симв.).",
+            f"mivta: текст слишком длинный ({len(parsed.text)} / {max_allowed} симв.).",
         )
         return
 
@@ -176,11 +186,25 @@ async def handle_business_message(
     effective_target = parsed.target_lang or user_settings.target_lang
     effective_style = parsed.style or user_settings.style
 
-    if not has_translatable_text(parsed.text):
-        final_text = parsed.text[:TELEGRAM_MAX_MESSAGE_LEN]
+    telegram_max = TELEGRAM_MAX_CAPTION_LEN if is_caption else TELEGRAM_MAX_MESSAGE_LEN
+    prepared = prepare_text_for_translation(
+        parsed.text,
+        entities=parsed.entities,
+        glossary=config.translator_glossary,
+        protect_glossary_tokens=not translator.uses_llm_glossary,
+        parse_inline_code_markdown=False,
+    )
+
+    if not has_translatable_text(prepared.translatable_probe):
+        restored = restore_formatted_text(
+            prepared.encoded_text,
+            prepared,
+            max_length=telegram_max,
+            emit_entities_only_if_rich=False,
+        )
     else:
         request = TranslationRequest(
-            text=parsed.text,
+            text=prepared.encoded_text,
             source_lang=effective_source,
             target_lang=effective_target,
             style=effective_style,
@@ -216,19 +240,37 @@ async def handle_business_message(
             )
             return
 
-        final_text = outcome.translated_text[:TELEGRAM_MAX_MESSAGE_LEN]
+        restored = restore_formatted_text(
+            outcome.translated_text,
+            prepared,
+            max_length=telegram_max,
+            emit_entities_only_if_rich=False,
+        )
 
-    if not final_text or final_text == message.text:
+    final_text = restored.text
+    final_entities = restored.entities
+    if not final_text or (final_text == raw_content and not final_entities):
         return
 
     try:
-        await bot.edit_message_text(
-            business_connection_id=conn_id,
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            text=final_text,
-            parse_mode=None,
-        )
+        if is_caption:
+            await bot.edit_message_caption(
+                business_connection_id=conn_id,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                caption=final_text,
+                caption_entities=final_entities,
+                parse_mode=None,
+            )
+        else:
+            await bot.edit_message_text(
+                business_connection_id=conn_id,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                text=final_text,
+                entities=final_entities,
+                parse_mode=None,
+            )
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc).lower():
             return

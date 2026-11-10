@@ -94,3 +94,45 @@ async def test_database_business_connections(tmp_path: Path) -> None:
     finally:
         await db.close()
 
+
+async def test_database_extra_langs_and_v010_schema_migration(tmp_path: Path) -> None:
+    import aiosqlite
+
+    legacy_path = str(tmp_path / "legacy_v010.db")
+    # Create a v0.1.0 database WITHOUT `extra_langs` column
+    async with aiosqlite.connect(legacy_path) as raw_conn:
+        await raw_conn.execute(
+            """
+            CREATE TABLE user_settings (
+                user_id INTEGER PRIMARY KEY,
+                source_lang TEXT NOT NULL DEFAULT 'auto',
+                target_lang TEXT NOT NULL DEFAULT 'en',
+                style TEXT NOT NULL DEFAULT 'neutral',
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        await raw_conn.execute(
+            "INSERT INTO user_settings (user_id, source_lang, target_lang, style, updated_at) "
+            "VALUES (777, 'ru', 'de', 'formal', 1700000000)"
+        )
+        await raw_conn.commit()
+
+    db = Database(legacy_path, default_extra_langs=("pl", "fr"))
+    await db.connect()
+    try:
+        # Migrated row inherits default_extra_langs while extra_langs IS NULL
+        migrated = await db.get_user_settings(777)
+        assert migrated.target_lang == "de"
+        assert migrated.style == TranslationStyle.FORMAL
+        assert migrated.extra_langs == ("pl", "fr")
+
+        # Explicit user customization overrides defaults, including clearing to ()
+        customized = await db.update_user_settings(777, extra_langs=("es", "ja"))
+        assert customized.extra_langs == ("es", "ja")
+
+        cleared = await db.update_user_settings(777, extra_langs=())
+        assert cleared.extra_langs == ()
+    finally:
+        await db.close()
+
