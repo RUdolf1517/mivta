@@ -12,11 +12,11 @@ new release; backports to older tags are not guaranteed.
 
 | Version | Supported |
 | --- | --- |
-| Latest release (`v0.2.x`) and `main` | Yes |
-| Older releases (`< v0.2.1`) | No — upgrade to the latest release |
+| Latest release (`v0.3.x`) and `main` | Yes |
+| Older releases (`< v0.3.0`) | No — upgrade to the latest release |
 
-Include the release tag or commit hash (`git -C /opt/mivta rev-parse HEAD`) in
-your report so the affected code can be identified unambiguously.
+Include the release tag or `python -m mivta --version` output in your report so
+the affected code can be identified unambiguously.
 
 ## Report a vulnerability
 

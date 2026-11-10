@@ -1,4 +1,4 @@
-"""Command and settings callback handlers (persistent user preferences only)."""
+"""Command and settings callback handlers (localized EN / RU persistent preferences)."""
 
 from __future__ import annotations
 
@@ -12,40 +12,88 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    User,
 )
 
-from mivta.config import MAX_INLINE_EXTRA_LANGS
+from mivta.config import MAX_INLINE_EXTRA_LANGS, Config
 from mivta.database import Database, UserSettings
-from mivta.translator.base import STYLE_LABELS_RU, TranslationStyle, parse_style
+from mivta.translator.base import TranslationStyle, parse_style
+from mivta.utils.i18n import (
+    parse_ui_lang,
+    resolve_ui_lang,
+    style_label,
+    suggest_swap_lang,
+)
 from mivta.utils.languages import (
     AUTO_LANG,
-    LANGUAGE_BY_CODE,
     QUICK_LANGUAGES_PRIMARY,
     QUICK_LANGUAGES_SECONDARY,
     language_label,
+    language_name,
     resolve_language,
 )
 
 _CLEAR_TOKENS = frozenset({"off", "clear", "none", "reset", "выкл", "сброс", "-"})
 
 
-def _format_extra_langs(extra_langs: tuple[str, ...]) -> str:
+def _ui_for(user: User, settings: UserSettings, config: Config) -> str:
+    return resolve_ui_lang(
+        settings.ui_lang,
+        user.language_code,
+        default_ui_lang=config.default_ui_lang,
+    )
+
+
+def _off_label(ui_lang: str) -> str:
+    return "off" if ui_lang == "en" else "выкл"
+
+
+def _format_extra_langs(extra_langs: tuple[str, ...], ui_lang: str) -> str:
     if not extra_langs:
-        return "выкл"
+        return _off_label(ui_lang)
     return ", ".join(code.upper() for code in extra_langs)
 
 
-def _format_settings_text(settings: UserSettings, bot_username: str) -> str:
-    src_label = language_label(settings.source_lang)
-    tgt_label = language_label(settings.target_lang)
-    style_label = STYLE_LABELS_RU[settings.style]
-    extra_str = _format_extra_langs(settings.extra_langs)
+def _format_swap_lang(swap_lang: str, ui_lang: str) -> str:
+    if not swap_lang:
+        return _off_label(ui_lang)
+    return language_label(swap_lang, ui_lang=ui_lang)
+
+
+def _format_settings_text(
+    settings: UserSettings,
+    bot_username: str,
+    ui_lang: str,
+) -> str:
+    src_label = language_label(settings.source_lang, ui_lang=ui_lang)
+    tgt_label = language_label(settings.target_lang, ui_lang=ui_lang)
+    swap_str = _format_swap_lang(settings.swap_lang, ui_lang)
+    st_label = style_label(settings.style, ui_lang)
+    extra_str = _format_extra_langs(settings.extra_langs, ui_lang)
+
+    if ui_lang == "en":
+        return (
+            "mivta Translation Settings\n\n"
+            f"• Source language: {src_label}\n"
+            f"• Target language: {tgt_label}\n"
+            f"• Auto-swap pair (⇄): {swap_str}\n"
+            f"• Extra Inline cards: {extra_str}\n"
+            f"• Style: {st_label}\n\n"
+            "Inline Mode (any chat):\n"
+            f"• @{bot_username} Hello, how are you?\n"
+            f"• @{bot_username} >de text · en>pl text · !formal text\n\n"
+            "Secretary Mode / Chat Automation (no 'via @bot' label):\n"
+            "• > Hello, how are you? (messages & media captions)\n"
+            "• >de text · en>pl !formal text"
+        )
+
     return (
         "Настройки перевода mivta\n\n"
         f"• Исходный язык: {src_label}\n"
         f"• Язык перевода: {tgt_label}\n"
+        f"• Авто-смена (⇄): {swap_str}\n"
         f"• Доп. языки Inline: {extra_str}\n"
-        f"• Стиль: {style_label}\n\n"
+        f"• Стиль: {st_label}\n\n"
         "Inline Mode (любой чат):\n"
         f"• @{bot_username} Привет, как дела?\n"
         f"• @{bot_username} >de текст · ru>en текст · !formal текст\n\n"
@@ -55,7 +103,43 @@ def _format_settings_text(settings: UserSettings, bot_username: str) -> str:
     )
 
 
-def _main_settings_keyboard(settings: UserSettings) -> InlineKeyboardMarkup:
+def _format_privacy_text(ui_lang: str) -> str:
+    if ui_lang == "en":
+        return (
+            "mivta Privacy Policy\n\n"
+            "1. Zero message logging: mivta never stores message text, inline queries, "
+            "or translated strings on disk or in server logs.\n"
+            "2. Minimal SQLite preferences: only your numeric Telegram user_id, chosen "
+            "language/style codes, and Chat Automation status flags are saved.\n"
+            "3. Transient RAM cache: identical translations are held only in memory by "
+            "short BLAKE2b digest until TTL expiry and are never written to disk.\n"
+            "4. Upstream translation: text you explicitly submit via @bot or '>' is sent "
+            "to the configured translation API solely to return the translation.\n"
+            "5. Data erasure: run /reset (or tap the button below) at any time to delete "
+            "your stored preferences immediately."
+        )
+    return (
+        "Политика конфиденциальности mivta\n\n"
+        "1. Без хранения переписки: mivta никогда не записывает тексты сообщений, "
+        "inline-запросы и переводы на диск или в логи сервера.\n"
+        "2. Минимум метаданных в SQLite: хранятся только числовой user_id, выбранные "
+        "коды языков/стиля и технический статус подключения Автоматизации чатов.\n"
+        "3. Временный кэш в ОЗУ: кэш переводов хранится только в оперативной памяти по "
+        "BLAKE2b-хэшу до истечения TTL и очищается фоновым процессом.\n"
+        "4. Внешний провайдер перевода: текст, явно отправленный через @bot или «>», "
+        "передаётся выбранному API переводчика исключительно для получения перевода.\n"
+        "5. Удаление данных: команда /reset (или кнопка ниже) мгновенно удаляет ваши "
+        "сохранённые настройки из базы."
+    )
+
+
+def _main_settings_keyboard(
+    settings: UserSettings,
+    *,
+    ui_lang: str,
+    telegram_lang_code: str | None = None,
+) -> InlineKeyboardMarkup:
+    is_en = ui_lang == "en"
     rows: list[list[InlineKeyboardButton]] = []
 
     # Quick target language row (most common 6 languages for 1-tap switching)
@@ -79,47 +163,100 @@ def _main_settings_keyboard(settings: UserSettings) -> InlineKeyboardMarkup:
         TranslationStyle.FORMAL,
     ):
         prefix = "• " if settings.style == style else ""
+        lbl = style_label(style, ui_lang).capitalize()
         style_row.append(
             InlineKeyboardButton(
-                text=f"{prefix}{STYLE_LABELS_RU[style].capitalize()}",
+                text=f"{prefix}{lbl}",
                 callback_data=f"cfg:set_style:{style.value}",
             )
         )
     rows.append(style_row)
 
     # Full target & source language pickers
-    src_short = "Авто" if settings.source_lang == AUTO_LANG else settings.source_lang.upper()
+    src_short = (
+        ("Auto" if is_en else "Авто")
+        if settings.source_lang == AUTO_LANG
+        else settings.source_lang.upper()
+    )
     rows.append(
         [
             InlineKeyboardButton(
-                text=f"Язык перевода ({settings.target_lang.upper()}) ▸",
+                text=(
+                    f"Target ({settings.target_lang.upper()}) ▸"
+                    if is_en
+                    else f"Язык перевода ({settings.target_lang.upper()}) ▸"
+                ),
                 callback_data="cfg:tgt_menu:1",
             ),
             InlineKeyboardButton(
-                text=f"Исходный ({src_short}) ▸",
+                text=(
+                    f"Source ({src_short}) ▸"
+                    if is_en
+                    else f"Исходный ({src_short}) ▸"
+                ),
                 callback_data="cfg:src_menu:1",
             ),
         ]
     )
 
-    # Multi-card extra inline languages picker
-    extra_short = _format_extra_langs(settings.extra_langs)
+    # Bidirectional Auto-Swap + Extra Inline cards row
+    swap_short = settings.swap_lang.upper() if settings.swap_lang else _off_label(ui_lang)
+    extra_short = _format_extra_langs(settings.extra_langs, ui_lang)
     rows.append(
         [
             InlineKeyboardButton(
-                text=f"Доп. карточки Inline ({extra_short}) ▸",
+                text=(
+                    f"⇄ Auto-swap ({swap_short}) ▸"
+                    if is_en
+                    else f"⇄ Авто-смена ({swap_short}) ▸"
+                ),
+                callback_data="cfg:swap_menu:1",
+            ),
+            InlineKeyboardButton(
+                text=(
+                    f"Extra cards ({extra_short}) ▸"
+                    if is_en
+                    else f"Доп. карточки ({extra_short}) ▸"
+                ),
                 callback_data="cfg:extra_menu:1",
-            )
+            ),
         ]
     )
 
-    # Jump straight back to inline input in any chat
+    # 1-tap smart auto-swap suggestion based on Telegram client locale when not yet set
+    suggested_swap = suggest_swap_lang(telegram_lang_code, settings.target_lang)
+    if not settings.swap_lang and suggested_swap:
+        pair_label = f"{settings.target_lang.upper()} ⇄ {suggested_swap.upper()}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        f"Enable {pair_label} auto-swap"
+                        if is_en
+                        else f"Включить авто-смену {pair_label}"
+                    ),
+                    callback_data=f"cfg:set_swap:{suggested_swap}",
+                )
+            ]
+        )
+
+    # UI language toggle + Jump straight back to inline input in any chat
+    next_ui = "ru" if is_en else "en"
+    ui_btn_text = "🌐 Русский UI" if is_en else "🌐 English UI"
     rows.append(
         [
             InlineKeyboardButton(
-                text="Перейти к переводу в чате",
+                text=ui_btn_text,
+                callback_data=f"cfg:set_ui:{next_ui}",
+            ),
+            InlineKeyboardButton(
+                text=(
+                    "Translate in chat ▸"
+                    if is_en
+                    else "Перевести в чате ▸"
+                ),
                 switch_inline_query="",
-            )
+            ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -130,10 +267,14 @@ def _language_grid_keyboard(
     mode: str,
     active_code: str,
     page: int,
+    ui_lang: str,
 ) -> InlineKeyboardMarkup:
+    is_en = ui_lang == "en"
     codes = QUICK_LANGUAGES_PRIMARY if page == 1 else QUICK_LANGUAGES_SECONDARY
-    action = "set_tgt" if mode == "tgt" else "set_src"
-    menu = "tgt_menu" if mode == "tgt" else "src_menu"
+    action_map = {"tgt": "set_tgt", "src": "set_src", "swap": "set_swap"}
+    menu_map = {"tgt": "tgt_menu", "src": "src_menu", "swap": "swap_menu"}
+    action = action_map[mode]
+    menu = menu_map[mode]
 
     rows: list[list[InlineKeyboardButton]] = []
     if mode == "src":
@@ -141,19 +282,36 @@ def _language_grid_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{auto_prefix}Автоопределение (auto)",
+                    text=(
+                        f"{auto_prefix}Auto-detect (auto)"
+                        if is_en
+                        else f"{auto_prefix}Автоопределение (auto)"
+                    ),
                     callback_data="cfg:set_src:auto",
+                )
+            ]
+        )
+    elif mode == "swap" and active_code:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        "✕ Disable auto-swap"
+                        if is_en
+                        else "✕ Выключить авто-смену"
+                    ),
+                    callback_data="cfg:set_swap:off",
                 )
             ]
         )
 
     current_row: list[InlineKeyboardButton] = []
     for code in codes:
-        info = LANGUAGE_BY_CODE[code]
         prefix = "• " if active_code == code else ""
+        disp = language_name(code, ui_lang=ui_lang)
         current_row.append(
             InlineKeyboardButton(
-                text=f"{prefix}{info.russian_name} ({code})",
+                text=f"{prefix}{disp} ({code})",
                 callback_data=f"cfg:{action}:{code}",
             )
         )
@@ -164,10 +322,15 @@ def _language_grid_keyboard(
         rows.append(current_row)
 
     other_page = 2 if page == 1 else 1
-    other_label = "Ещё языки ▸" if page == 1 else "◂ Основные языки"
+    if is_en:
+        other_label = "More languages ▸" if page == 1 else "◂ Main languages"
+        back_label = "◂ Back"
+    else:
+        other_label = "Ещё языки ▸" if page == 1 else "◂ Основные языки"
+        back_label = "◂ Назад"
     rows.append(
         [
-            InlineKeyboardButton(text="◂ Назад", callback_data="cfg:main"),
+            InlineKeyboardButton(text=back_label, callback_data="cfg:main"),
             InlineKeyboardButton(text=other_label, callback_data=f"cfg:{menu}:{other_page}"),
         ]
     )
@@ -178,7 +341,9 @@ def _extra_languages_keyboard(
     *,
     extra_langs: tuple[str, ...],
     page: int,
+    ui_lang: str,
 ) -> InlineKeyboardMarkup:
+    is_en = ui_lang == "en"
     codes = QUICK_LANGUAGES_PRIMARY if page == 1 else QUICK_LANGUAGES_SECONDARY
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -186,7 +351,11 @@ def _extra_languages_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✕ Сбросить доп. языки (оставить один)",
+                    text=(
+                        "✕ Clear extra languages"
+                        if is_en
+                        else "✕ Сбросить доп. языки (оставить один)"
+                    ),
                     callback_data=f"cfg:clear_extra:{page}",
                 )
             ]
@@ -194,11 +363,11 @@ def _extra_languages_keyboard(
 
     current_row: list[InlineKeyboardButton] = []
     for code in codes:
-        info = LANGUAGE_BY_CODE[code]
         prefix = "✓ " if code in extra_langs else ""
+        disp = language_name(code, ui_lang=ui_lang)
         current_row.append(
             InlineKeyboardButton(
-                text=f"{prefix}{info.russian_name} ({code})",
+                text=f"{prefix}{disp} ({code})",
                 callback_data=f"cfg:toggle_extra:{code}:{page}",
             )
         )
@@ -209,10 +378,15 @@ def _extra_languages_keyboard(
         rows.append(current_row)
 
     other_page = 2 if page == 1 else 1
-    other_label = "Ещё языки ▸" if page == 1 else "◂ Основные языки"
+    if is_en:
+        other_label = "More languages ▸" if page == 1 else "◂ Main languages"
+        done_label = "◂ Done"
+    else:
+        other_label = "Ещё языки ▸" if page == 1 else "◂ Основные языки"
+        done_label = "◂ Готово"
     rows.append(
         [
-            InlineKeyboardButton(text="◂ Готово", callback_data="cfg:main"),
+            InlineKeyboardButton(text=done_label, callback_data="cfg:main"),
             InlineKeyboardButton(
                 text=other_label,
                 callback_data=f"cfg:extra_menu:{other_page}",
@@ -222,11 +396,33 @@ def _extra_languages_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _extra_menu_title(settings: UserSettings) -> str:
-    extra_str = _format_extra_langs(settings.extra_langs)
+def _extra_menu_title(settings: UserSettings, ui_lang: str) -> str:
+    extra_str = _format_extra_langs(settings.extra_langs, ui_lang)
+    if ui_lang == "en":
+        return (
+            f"Extra Inline Mode card languages (up to {MAX_INLINE_EXTRA_LANGS}):\n"
+            f"Primary target: {settings.target_lang.upper()} · Extra: {extra_str}"
+        )
     return (
         f"Дополнительные языки для карточек Inline Mode (до {MAX_INLINE_EXTRA_LANGS}):\n"
         f"Основной язык: {settings.target_lang.upper()} · Доп.: {extra_str}"
+    )
+
+
+def _swap_menu_title(settings: UserSettings, ui_lang: str) -> str:
+    swap_str = _format_swap_lang(settings.swap_lang, ui_lang)
+    if ui_lang == "en":
+        return (
+            "Bidirectional Auto-Swap (⇄):\n"
+            f"When input is already in {settings.target_lang.upper()}, automatically "
+            f"translate into the paired language instead.\n"
+            f"Current: {swap_str}"
+        )
+    return (
+        "Двусторонняя авто-смена языка (⇄):\n"
+        f"Если исходный текст уже на {settings.target_lang.upper()}, бот автоматически "
+        "переведёт его на выбранный парный язык.\n"
+        f"Сейчас: {swap_str}"
     )
 
 
@@ -247,83 +443,185 @@ async def _edit_safely(
 async def cmd_start(
     message: Message,
     command: CommandObject,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
     if message.from_user is None:
         return
     settings = await db.get_user_settings(message.from_user.id)
+    ui = _ui_for(message.from_user, settings, config)
+    kb = _main_settings_keyboard(
+        settings,
+        ui_lang=ui,
+        telegram_lang_code=message.from_user.language_code,
+    )
     if command.args and command.args.strip().lower() == "settings":
-        await message.answer(
-            _format_settings_text(settings, bot_username),
-            reply_markup=_main_settings_keyboard(settings),
-        )
+        await message.answer(_format_settings_text(settings, bot_username, ui), reply_markup=kb)
         return
 
-    text = (
-        "mivta — переводчик для Telegram Inline & Secretary Mode.\n\n"
-        "Бот не переводит пересланные или личные сообщения здесь. "
-        "Чтобы перевести текст, вызовите бота прямо в поле ввода любого чата:\n\n"
-        f"@{bot_username} Привет, как дела?\n\n"
-        "Выберите готовый перевод во всплывающем окне — и он отправится от вашего имени.\n\n"
-        "Ниже можно настроить язык по умолчанию, доп. карточки Inline и стиль перевода."
-    )
-    await message.answer(text, reply_markup=_main_settings_keyboard(settings))
+    if ui == "en":
+        text = (
+            "mivta — Telegram Inline & Secretary Mode translator.\n\n"
+            "Direct or forwarded messages here are not translated. "
+            "Invoke the bot straight from the input field of any chat:\n\n"
+            f"@{bot_username} Hello, how are you?\n\n"
+            "Tap a translation card in the popup to send it under your own name.\n\n"
+            "Configure your target language, ⇄ auto-swap pair, extra cards, and style below."
+        )
+    else:
+        text = (
+            "mivta — переводчик для Telegram Inline & Secretary Mode.\n\n"
+            "Бот не переводит пересланные или личные сообщения здесь. "
+            "Чтобы перевести текст, вызовите бота прямо в поле ввода любого чата:\n\n"
+            f"@{bot_username} Привет, как дела?\n\n"
+            "Выберите готовый перевод во всплывающем окне — и он отправится от вашего имени.\n\n"
+            "Ниже можно настроить язык по умолчанию, ⇄ авто-смену, доп. карточки и стиль."
+        )
+    await message.answer(text, reply_markup=kb)
 
 
 async def cmd_settings(
     message: Message,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
     if message.from_user is None:
         return
     settings = await db.get_user_settings(message.from_user.id)
+    ui = _ui_for(message.from_user, settings, config)
     await message.answer(
-        _format_settings_text(settings, bot_username),
-        reply_markup=_main_settings_keyboard(settings),
+        _format_settings_text(settings, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            settings,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
     )
 
 
 async def cmd_lang(
     message: Message,
     command: CommandObject,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
     if message.from_user is None:
         return
     user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+
     if not command.args or not command.args.strip():
-        settings = await db.get_user_settings(user_id)
         await message.answer(
-            "Выберите язык перевода по умолчанию (или укажите код: /lang en, /lang de):",
+            (
+                "Choose your default target language (or pass a code: /lang en, /lang de):"
+                if is_en
+                else "Выберите язык перевода по умолчанию (или укажите код: /lang en, /lang de):"
+            ),
             reply_markup=_language_grid_keyboard(
                 mode="tgt",
                 active_code=settings.target_lang,
                 page=1,
+                ui_lang=ui,
             ),
         )
         return
 
     resolved = resolve_language(command.args, allow_auto=False)
     if resolved is None:
+        raw = command.args.strip()
         await message.answer(
-            f"Неизвестный язык назначения: «{command.args.strip()}».\n"
-            "Пример: /lang en, /lang de, /lang pl, /lang ja"
+            f"Unknown target language: '{raw}'.\nExample: /lang en, /lang de, /lang pl, /lang ja"
+            if is_en
+            else f"Неизвестный язык назначения: «{raw}».\nПример: /lang en, /lang de, /lang pl"
         )
         return
 
-    settings = await db.update_user_settings(user_id, target_lang=resolved)
+    updated = await db.update_user_settings(user_id, target_lang=resolved)
     await message.answer(
-        _format_settings_text(settings, bot_username),
-        reply_markup=_main_settings_keyboard(settings),
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
+    )
+
+
+async def cmd_swap(
+    message: Message,
+    command: CommandObject,
+    config: Config,
+    db: Database,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Configure bidirectional auto-swap language (`/swap ru`, `/swap pl`, `/swap off`)."""
+    if message.from_user is None:
+        return
+    user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+    raw_args = (command.args or "").strip()
+
+    if not raw_args:
+        await message.answer(
+            _swap_menu_title(settings, ui),
+            reply_markup=_language_grid_keyboard(
+                mode="swap",
+                active_code=settings.swap_lang,
+                page=1,
+                ui_lang=ui,
+            ),
+        )
+        return
+
+    if raw_args.lower() in _CLEAR_TOKENS:
+        updated = await db.update_user_settings(user_id, swap_lang="")
+        await message.answer(
+            _format_settings_text(updated, bot_username, ui),
+            reply_markup=_main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=message.from_user.language_code,
+            ),
+        )
+        return
+
+    resolved = resolve_language(raw_args, allow_auto=False)
+    if resolved is None:
+        await message.answer(
+            (
+                f"Unknown language code: '{raw_args}'.\n"
+                "Example: /swap pl, /swap ru · disable: /swap off"
+            )
+            if is_en
+            else (
+                f"Неизвестный код языка: «{raw_args}».\n"
+                "Пример: /swap ru, /swap pl · выкл: /swap off"
+            )
+        )
+        return
+
+    updated = await db.update_user_settings(user_id, swap_lang=resolved)
+    await message.answer(
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
     )
 
 
 async def cmd_langs(
     message: Message,
     command: CommandObject,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
@@ -331,20 +629,31 @@ async def cmd_langs(
     if message.from_user is None:
         return
     user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
     raw_args = (command.args or "").strip()
+
     if not raw_args:
-        settings = await db.get_user_settings(user_id)
         await message.answer(
-            _extra_menu_title(settings),
-            reply_markup=_extra_languages_keyboard(extra_langs=settings.extra_langs, page=1),
+            _extra_menu_title(settings, ui),
+            reply_markup=_extra_languages_keyboard(
+                extra_langs=settings.extra_langs,
+                page=1,
+                ui_lang=ui,
+            ),
         )
         return
 
     if raw_args.lower() in _CLEAR_TOKENS:
-        settings = await db.update_user_settings(user_id, extra_langs=())
+        updated = await db.update_user_settings(user_id, extra_langs=())
         await message.answer(
-            _format_settings_text(settings, bot_username),
-            reply_markup=_main_settings_keyboard(settings),
+            _format_settings_text(updated, bot_username, ui),
+            reply_markup=_main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=message.from_user.language_code,
+            ),
         )
         return
 
@@ -354,8 +663,15 @@ async def cmd_langs(
         code = resolve_language(tok, allow_auto=False)
         if code is None:
             await message.answer(
-                f"Неизвестный код языка: «{tok}».\n"
-                "Пример: /langs pl de · отключить: /langs off"
+                (
+                    f"Unknown language code: '{tok}'.\n"
+                    "Example: /langs pl de · disable: /langs off"
+                )
+                if is_en
+                else (
+                    f"Неизвестный код языка: «{tok}».\n"
+                    "Пример: /langs pl de · отключить: /langs off"
+                )
             )
             return
         if code not in resolved_codes:
@@ -363,88 +679,244 @@ async def cmd_langs(
 
     if len(resolved_codes) > MAX_INLINE_EXTRA_LANGS:
         await message.answer(
-            f"Можно выбрать не более {MAX_INLINE_EXTRA_LANGS} дополнительных языков.\n"
+            (
+                f"You can select at most {MAX_INLINE_EXTRA_LANGS} extra languages.\n"
+                "Example: /langs pl de"
+            )
+            if is_en
+            else f"Можно выбрать не более {MAX_INLINE_EXTRA_LANGS} дополнительных языков.\n"
             "Пример: /langs pl de"
         )
         return
 
-    settings = await db.update_user_settings(user_id, extra_langs=resolved_codes)
+    updated = await db.update_user_settings(user_id, extra_langs=resolved_codes)
     await message.answer(
-        _format_settings_text(settings, bot_username),
-        reply_markup=_main_settings_keyboard(settings),
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
     )
 
 
 async def cmd_source(
     message: Message,
     command: CommandObject,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
     if message.from_user is None:
         return
     user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+
     if not command.args or not command.args.strip():
-        settings = await db.get_user_settings(user_id)
         await message.answer(
-            "Выберите исходный язык (или укажите /source auto либо /source ru):",
+            (
+                "Choose source language (or pass /source auto or /source en):"
+                if is_en
+                else "Выберите исходный язык (или укажите /source auto либо /source ru):"
+            ),
             reply_markup=_language_grid_keyboard(
                 mode="src",
                 active_code=settings.source_lang,
                 page=1,
+                ui_lang=ui,
             ),
         )
         return
 
     resolved = resolve_language(command.args, allow_auto=True)
     if resolved is None:
+        raw = command.args.strip()
         await message.answer(
-            f"Неизвестный исходный язык: «{command.args.strip()}».\n"
-            "Пример: /source auto, /source ru, /source en"
+            f"Unknown source language: '{raw}'.\nExample: /source auto, /source en, /source ru"
+            if is_en
+            else (
+                f"Неизвестный исходный язык: «{raw}».\n"
+                "Пример: /source auto, /source ru, /source en"
+            )
         )
         return
 
-    settings = await db.update_user_settings(user_id, source_lang=resolved)
+    updated = await db.update_user_settings(user_id, source_lang=resolved)
     await message.answer(
-        _format_settings_text(settings, bot_username),
-        reply_markup=_main_settings_keyboard(settings),
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
     )
 
 
 async def cmd_style(
     message: Message,
     command: CommandObject,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
     if message.from_user is None:
         return
     user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+
     if not command.args or not command.args.strip():
-        settings = await db.get_user_settings(user_id)
         await message.answer(
-            _format_settings_text(settings, bot_username),
-            reply_markup=_main_settings_keyboard(settings),
+            _format_settings_text(settings, bot_username, ui),
+            reply_markup=_main_settings_keyboard(
+                settings,
+                ui_lang=ui,
+                telegram_lang_code=message.from_user.language_code,
+            ),
         )
         return
 
     parsed = parse_style(command.args)
     if parsed is None:
+        raw = command.args.strip()
         await message.answer(
-            f"Неизвестный стиль: «{command.args.strip()}».\n"
+            (
+                f"Unknown style: '{raw}'.\n"
+                "Available: /style neutral, /style casual, /style formal"
+            )
+            if is_en
+            else f"Неизвестный стиль: «{raw}».\n"
             "Доступные варианты: /style neutral, /style casual, /style formal"
         )
         return
 
-    settings = await db.update_user_settings(user_id, style=parsed)
+    updated = await db.update_user_settings(user_id, style=parsed)
     await message.answer(
-        _format_settings_text(settings, bot_username),
-        reply_markup=_main_settings_keyboard(settings),
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
+    )
+
+
+async def cmd_ui(
+    message: Message,
+    command: CommandObject,
+    config: Config,
+    db: Database,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Switch bot interface language (`/ui en`, `/ui ru`, or `/ui auto`)."""
+    if message.from_user is None:
+        return
+    user_id = message.from_user.id
+    settings = await db.get_user_settings(user_id)
+    current_ui = _ui_for(message.from_user, settings, config)
+    raw_args = (command.args or "").strip()
+
+    if not raw_args:
+        toggled = "ru" if current_ui == "en" else "en"
+        updated = await db.update_user_settings(user_id, ui_lang=toggled)
+        ui = _ui_for(message.from_user, updated, config)
+        await message.answer(
+            _format_settings_text(updated, bot_username, ui),
+            reply_markup=_main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=message.from_user.language_code,
+            ),
+        )
+        return
+
+    parsed = parse_ui_lang(raw_args)
+    if parsed is None:
+        await message.answer(
+            "Usage: /ui en, /ui ru, or /ui auto"
+            if current_ui == "en"
+            else "Использование: /ui en, /ui ru или /ui auto"
+        )
+        return
+
+    updated = await db.update_user_settings(user_id, ui_lang=parsed)
+    ui = _ui_for(message.from_user, updated, config)
+    await message.answer(
+        _format_settings_text(updated, bot_username, ui),
+        reply_markup=_main_settings_keyboard(
+            updated,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
+    )
+
+
+async def cmd_privacy(
+    message: Message,
+    config: Config,
+    db: Database,
+) -> None:
+    """Display transparent privacy policy and self-service erasure button."""
+    if message.from_user is None:
+        return
+    settings = await db.get_user_settings(message.from_user.id)
+    ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=(
+                        "Reset my saved settings"
+                        if is_en
+                        else "Удалить мои настройки (/reset)"
+                    ),
+                    callback_data="cfg:reset",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◂ Settings" if is_en else "◂ Настройки",
+                    callback_data="cfg:main",
+                )
+            ],
+        ]
+    )
+    await message.answer(_format_privacy_text(ui), reply_markup=keyboard)
+
+
+async def cmd_reset(
+    message: Message,
+    config: Config,
+    db: Database,
+) -> None:
+    """Delete caller's stored preferences from SQLite immediately."""
+    if message.from_user is None:
+        return
+    prev_settings = await db.get_user_settings(message.from_user.id)
+    ui = _ui_for(message.from_user, prev_settings, config)
+    await db.delete_user_data(message.from_user.id)
+    fresh = await db.get_user_settings(message.from_user.id)
+    await message.answer(
+        (
+            "Your saved preferences have been deleted and reset to defaults."
+            if ui == "en"
+            else "Ваши сохранённые настройки удалены из базы и сброшены к значениям по умолчанию."
+        ),
+        reply_markup=_main_settings_keyboard(
+            fresh,
+            ui_lang=ui,
+            telegram_lang_code=message.from_user.language_code,
+        ),
     )
 
 
 async def handle_settings_callback(
     callback: CallbackQuery,
+    config: Config,
     db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
@@ -452,46 +924,75 @@ async def handle_settings_callback(
         await callback.answer()
         return
 
-    user_id = callback.from_user.id
+    user = callback.from_user
+    user_id = user.id
+    settings = await db.get_user_settings(user_id)
+    ui = _ui_for(user, settings, config)
+    is_en = ui == "en"
+
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else "main"
     arg = parts[2] if len(parts) > 2 else ""
 
     if action == "main":
-        settings = await db.get_user_settings(user_id)
         await _edit_safely(
             callback,
-            _format_settings_text(settings, bot_username),
-            _main_settings_keyboard(settings),
+            _format_settings_text(settings, bot_username, ui),
+            _main_settings_keyboard(
+                settings,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+            ),
         )
         await callback.answer()
         return
 
-    if action in ("tgt_menu", "src_menu"):
+    if action in ("tgt_menu", "src_menu", "swap_menu"):
         page = 2 if arg == "2" else 1
-        mode = "tgt" if action == "tgt_menu" else "src"
-        settings = await db.get_user_settings(user_id)
-        active = settings.target_lang if mode == "tgt" else settings.source_lang
-        title = (
-            "Выберите язык перевода по умолчанию:"
-            if mode == "tgt"
-            else "Выберите исходный язык (или «Автоопределение»):"
-        )
+        if action == "tgt_menu":
+            mode = "tgt"
+            active = settings.target_lang
+            title = (
+                "Choose default target language:"
+                if is_en
+                else "Выберите язык перевода по умолчанию:"
+            )
+        elif action == "src_menu":
+            mode = "src"
+            active = settings.source_lang
+            title = (
+                "Choose source language (or Auto-detect):"
+                if is_en
+                else "Выберите исходный язык (или «Автоопределение»):"
+            )
+        else:
+            mode = "swap"
+            active = settings.swap_lang
+            title = _swap_menu_title(settings, ui)
+
         await _edit_safely(
             callback,
             title,
-            _language_grid_keyboard(mode=mode, active_code=active, page=page),
+            _language_grid_keyboard(
+                mode=mode,
+                active_code=active,
+                page=page,
+                ui_lang=ui,
+            ),
         )
         await callback.answer()
         return
 
     if action == "extra_menu":
         page = 2 if arg == "2" else 1
-        settings = await db.get_user_settings(user_id)
         await _edit_safely(
             callback,
-            _extra_menu_title(settings),
-            _extra_languages_keyboard(extra_langs=settings.extra_langs, page=page),
+            _extra_menu_title(settings, ui),
+            _extra_languages_keyboard(
+                extra_langs=settings.extra_langs,
+                page=page,
+                ui_lang=ui,
+            ),
         )
         await callback.answer()
         return
@@ -500,27 +1001,32 @@ async def handle_settings_callback(
         page = 2 if (len(parts) > 3 and parts[3] == "2") else 1
         resolved = resolve_language(arg, allow_auto=False)
         if resolved is None:
-            await callback.answer("Неизвестный язык", show_alert=False)
+            await callback.answer("Unknown language" if is_en else "Неизвестный язык")
             return
-        settings = await db.get_user_settings(user_id)
         current = list(settings.extra_langs)
+        lbl = language_label(resolved, ui_lang=ui)
         if resolved in current:
             current.remove(resolved)
-            note = f"Убран: {language_label(resolved)}"
+            note = f"Removed: {lbl}" if is_en else f"Убран: {lbl}"
         else:
             if len(current) >= MAX_INLINE_EXTRA_LANGS:
                 await callback.answer(
-                    f"Максимум {MAX_INLINE_EXTRA_LANGS} доп. языка",
-                    show_alert=False,
+                    f"Max {MAX_INLINE_EXTRA_LANGS} extra languages"
+                    if is_en
+                    else f"Максимум {MAX_INLINE_EXTRA_LANGS} доп. языка"
                 )
                 return
             current.append(resolved)
-            note = f"Добавлен: {language_label(resolved)}"
+            note = f"Added: {lbl}" if is_en else f"Добавлен: {lbl}"
         updated = await db.update_user_settings(user_id, extra_langs=current)
         await _edit_safely(
             callback,
-            _extra_menu_title(updated),
-            _extra_languages_keyboard(extra_langs=updated.extra_langs, page=page),
+            _extra_menu_title(updated, ui),
+            _extra_languages_keyboard(
+                extra_langs=updated.extra_langs,
+                page=page,
+                ui_lang=ui,
+            ),
         )
         await callback.answer(note)
         return
@@ -530,52 +1036,134 @@ async def handle_settings_callback(
         updated = await db.update_user_settings(user_id, extra_langs=())
         await _edit_safely(
             callback,
-            _extra_menu_title(updated),
-            _extra_languages_keyboard(extra_langs=updated.extra_langs, page=page),
+            _extra_menu_title(updated, ui),
+            _extra_languages_keyboard(
+                extra_langs=updated.extra_langs,
+                page=page,
+                ui_lang=ui,
+            ),
         )
-        await callback.answer("Дополнительные языки сброшены")
+        await callback.answer(
+            "Extra languages cleared" if is_en else "Дополнительные языки сброшены"
+        )
         return
 
     if action == "set_tgt":
         resolved = resolve_language(arg, allow_auto=False)
         if resolved is None:
-            await callback.answer("Неизвестный язык", show_alert=False)
+            await callback.answer("Unknown language" if is_en else "Неизвестный язык")
             return
-        settings = await db.update_user_settings(user_id, target_lang=resolved)
+        updated = await db.update_user_settings(user_id, target_lang=resolved)
+        lbl = language_label(resolved, ui_lang=ui)
         await _edit_safely(
             callback,
-            _format_settings_text(settings, bot_username),
-            _main_settings_keyboard(settings),
+            _format_settings_text(updated, bot_username, ui),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+            ),
         )
-        await callback.answer(f"Язык перевода: {language_label(resolved)}")
+        await callback.answer(f"Target: {lbl}" if is_en else f"Язык перевода: {lbl}")
         return
 
     if action == "set_src":
         resolved = resolve_language(arg, allow_auto=True)
         if resolved is None:
-            await callback.answer("Неизвестный язык", show_alert=False)
+            await callback.answer("Unknown language" if is_en else "Неизвестный язык")
             return
-        settings = await db.update_user_settings(user_id, source_lang=resolved)
+        updated = await db.update_user_settings(user_id, source_lang=resolved)
+        lbl = language_label(resolved, ui_lang=ui)
         await _edit_safely(
             callback,
-            _format_settings_text(settings, bot_username),
-            _main_settings_keyboard(settings),
+            _format_settings_text(updated, bot_username, ui),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+            ),
         )
-        await callback.answer(f"Исходный язык: {language_label(resolved)}")
+        await callback.answer(f"Source: {lbl}" if is_en else f"Исходный язык: {lbl}")
+        return
+
+    if action == "set_swap":
+        if arg.lower() in _CLEAR_TOKENS:
+            updated = await db.update_user_settings(user_id, swap_lang="")
+            toast = "Auto-swap disabled" if is_en else "Авто-смена выключена"
+        else:
+            resolved = resolve_language(arg, allow_auto=False)
+            if resolved is None:
+                await callback.answer("Unknown language" if is_en else "Неизвестный язык")
+                return
+            updated = await db.update_user_settings(user_id, swap_lang=resolved)
+            lbl = language_label(resolved, ui_lang=ui)
+            toast = f"Auto-swap: {lbl}" if is_en else f"Авто-смена: {lbl}"
+        await _edit_safely(
+            callback,
+            _format_settings_text(updated, bot_username, ui),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+            ),
+        )
+        await callback.answer(toast)
         return
 
     if action == "set_style":
         style = parse_style(arg)
         if style is None:
-            await callback.answer("Неизвестный стиль", show_alert=False)
+            await callback.answer("Unknown style" if is_en else "Неизвестный стиль")
             return
-        settings = await db.update_user_settings(user_id, style=style)
+        updated = await db.update_user_settings(user_id, style=style)
+        st_lbl = style_label(style, ui)
         await _edit_safely(
             callback,
-            _format_settings_text(settings, bot_username),
-            _main_settings_keyboard(settings),
+            _format_settings_text(updated, bot_username, ui),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+            ),
         )
-        await callback.answer(f"Стиль: {STYLE_LABELS_RU[style]}")
+        await callback.answer(f"Style: {st_lbl}" if is_en else f"Стиль: {st_lbl}")
+        return
+
+    if action == "set_ui":
+        parsed_ui = parse_ui_lang(arg)
+        if parsed_ui is None:
+            await callback.answer()
+            return
+        updated = await db.update_user_settings(user_id, ui_lang=parsed_ui)
+        new_ui = _ui_for(user, updated, config)
+        await _edit_safely(
+            callback,
+            _format_settings_text(updated, bot_username, new_ui),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=new_ui,
+                telegram_lang_code=user.language_code,
+            ),
+        )
+        await callback.answer("Language: English" if new_ui == "en" else "Язык интерфейса: Русский")
+        return
+
+    if action == "reset":
+        await db.delete_user_data(user_id)
+        fresh = await db.get_user_settings(user_id)
+        new_ui = _ui_for(user, fresh, config)
+        await _edit_safely(
+            callback,
+            _format_settings_text(fresh, bot_username, new_ui),
+            _main_settings_keyboard(
+                fresh,
+                ui_lang=new_ui,
+                telegram_lang_code=user.language_code,
+            ),
+        )
+        await callback.answer(
+            "Settings reset to defaults" if is_en else "Настройки сброшены"
+        )
         return
 
     await callback.answer()
@@ -583,30 +1171,48 @@ async def handle_settings_callback(
 
 async def reject_direct_messages(
     message: Message,
+    config: Config,
+    db: Database,
     bot_username: str = "BotUsername",
 ) -> None:
-    """Explicitly decline DM/forwarded/voice translation — Inline Mode is the sole flow."""
+    """Explicitly decline DM/forwarded/voice translation — Inline & Secretary are the sole flows."""
+    ui = config.default_ui_lang
+    if message.from_user is not None:
+        settings = await db.get_user_settings(message.from_user.id)
+        ui = _ui_for(message.from_user, settings, config)
+    is_en = ui == "en"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Перевести в чате (Inline Mode)",
+                    text=(
+                        "Translate in chat (Inline Mode)"
+                        if is_en
+                        else "Перевести в чате (Inline Mode)"
+                    ),
                     switch_inline_query="",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Настройки перевода",
+                    text="Translation settings" if is_en else "Настройки перевода",
                     callback_data="cfg:main",
                 )
             ],
         ]
     )
     await message.answer(
-        "mivta работает только в Inline Mode — пересылать сообщения "
-        "или отправлять аудио не нужно.\n\n"
-        f"Введите в поле ввода любого чата:\n@{bot_username} ваш текст\n\n"
-        "Для изменения языка или стиля используйте /settings.",
+        (
+            "mivta works in Inline Mode — no need to forward messages or send audio here.\n\n"
+            f"Type in the input field of any chat:\n@{bot_username} your text\n\n"
+            "Use /settings to change languages or style."
+            if is_en
+            else "mivta работает только в Inline Mode — пересылать сообщения "
+            "или отправлять аудио не нужно.\n\n"
+            f"Введите в поле ввода любого чата:\n@{bot_username} ваш текст\n\n"
+            "Для изменения языка или стиля используйте /settings."
+        ),
         reply_markup=keyboard,
     )
 
@@ -617,9 +1223,13 @@ def build_commands_router() -> Router:
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_settings, Command("help", "settings"))
     router.message.register(cmd_lang, Command("lang"))
+    router.message.register(cmd_swap, Command("swap"))
     router.message.register(cmd_langs, Command("langs"))
     router.message.register(cmd_source, Command("source"))
     router.message.register(cmd_style, Command("style"))
+    router.message.register(cmd_ui, Command("ui"))
+    router.message.register(cmd_privacy, Command("privacy"))
+    router.message.register(cmd_reset, Command("reset"))
     router.callback_query.register(handle_settings_callback, F.data.startswith("cfg:"))
     router.message.register(reject_direct_messages, F.chat.type == "private")
     return router

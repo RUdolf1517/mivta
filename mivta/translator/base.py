@@ -59,6 +59,7 @@ class TranslationRequest:
     target_lang: str
     source_lang: str = "auto"
     style: TranslationStyle = TranslationStyle.NEUTRAL
+    swap_lang: str = ""
 
 
 @dataclass(frozen=True, slots=True)
