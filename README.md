@@ -198,6 +198,49 @@ mivta/
 
 ## Развёртывание
 
+### Автоматическая установка на Ubuntu / Debian (`install.sh`)
+
+Скрипт `install.sh` автоматически проверяет/доустанавливает системные зависимости (`python3 >= 3.11`, `python3-venv`, `git`, `ca-certificates`, включая поддержку Ubuntu 22.04 / 24.04 / 26.04+), создаёт непривилегированного системного пользователя `mivta`, разворачивает виртуальное окружение в `/opt/mivta/.venv`, защищает права `/opt/mivta/.env` (`0600`) и регистрирует `systemd`-сервис `mivta.service`.
+
+**Интерактивная установка одной командой** (запросит `BOT_TOKEN` в терминале):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
+```
+
+**Неинтерактивная установка** (для автоматизации и CI/CD):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
+  | sudo BOT_TOKEN="123456:ABC..." TRANSLATOR_PROVIDER="google" MIVTA_NONINTERACTIVE=1 bash
+```
+
+Или с провайдером `openai` / `deepl`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
+  | sudo BOT_TOKEN="123456:ABC..." \
+         TRANSLATOR_PROVIDER="deepl" \
+         TRANSLATOR_API_KEY="xxxx:fx" \
+         MIVTA_NONINTERACTIVE=1 bash
+```
+
+**Обновление установленного бота** (сохраняет `/opt/mivta/.env` и базу настроек `/opt/mivta/data/mivta.db`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
+```
+
+**Удаление сервиса**:
+
+```bash
+# Удалить только systemd-юнит (сохранив .env и data/):
+sudo /opt/mivta/install.sh --uninstall
+
+# Полное удаление вместе с /opt/mivta и системным пользователем:
+sudo /opt/mivta/install.sh --uninstall --purge
+```
+
 ### Docker Compose
 
 ```bash
@@ -206,7 +249,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-### systemd (Linux VPS)
+### Ручная настройка systemd (Linux VPS)
 
 1. Установите проект в `/opt/mivta`:
 
