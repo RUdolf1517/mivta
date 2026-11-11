@@ -15,6 +15,7 @@ import pytest
 from aiogram.types import MessageEntity, User
 
 import mivta.bot as bot_module
+from mivta import __version__
 from mivta.bot import ALLOWED_UPDATES, SecretRedactingFilter, run_bot
 from mivta.config import Config, ConfigError
 from mivta.database import Database
@@ -286,7 +287,7 @@ def test_dunder_main_module_cli_and_traceback_secret_redaction() -> None:
         timeout=15,
     )
     assert proc.returncode == 0
-    assert "mivta 0.3.0" in proc.stdout
+    assert f"mivta {__version__}" in proc.stdout
 
     # Verify SecretRedactingFilter also scrubs cached exc_text tracebacks
     filt = SecretRedactingFilter(("sk-TRACEBACK_SECRET_9999",))

@@ -32,6 +32,7 @@ from aiogram.types import (
 )
 from aiohttp.test_utils import TestClient, TestServer
 
+from mivta import __version__
 from mivta.bot import SecretRedactingFilter, build_webhook_app, create_dispatcher, main
 from mivta.config import Config, ConfigError
 from mivta.database import Database
@@ -455,7 +456,7 @@ async def test_privacy_reset_commands_and_cli_flags(monkeypatch, capsys) -> None
 
     # Verify CLI --version and --check never print secrets
     assert main(["--version"]) == 0
-    assert "0.3.0" in capsys.readouterr().out
+    assert __version__ in capsys.readouterr().out
 
     monkeypatch.setenv("BOT_TOKEN", "999:CLI_SECRET_TOK")
     monkeypatch.setenv("WEBHOOK_URL", "https://bot.example.com")
