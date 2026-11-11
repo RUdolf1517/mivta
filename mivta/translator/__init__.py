@@ -3,6 +3,7 @@
 from mivta.translator.base import (
     STYLE_LABELS_RU,
     InvalidTranslationRequestError,
+    ProviderSpec,
     TextTooLongError,
     TranslationRequest,
     TranslationResult,
@@ -21,6 +22,7 @@ from mivta.translator.factory import create_http_client, create_translator
 from mivta.translator.fallback import FallbackTranslator
 from mivta.translator.google import GoogleTranslator
 from mivta.translator.libre import LibreTranslateTranslator
+from mivta.translator.mymemory import MyMemoryTranslator
 from mivta.translator.openai import OpenAITranslator
 
 __all__ = [
@@ -30,7 +32,9 @@ __all__ = [
     "GoogleTranslator",
     "InvalidTranslationRequestError",
     "LibreTranslateTranslator",
+    "MyMemoryTranslator",
     "OpenAITranslator",
+    "ProviderSpec",
     "TextTooLongError",
     "TranslationRequest",
     "TranslationResult",

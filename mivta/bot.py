@@ -266,6 +266,8 @@ async def run_bot(config: Config) -> None:
         fallback_api_key=config.translator_fallback_api_key,
         fallback_api_url=config.translator_fallback_api_url,
         fallback_model=config.translator_fallback_model,
+        provider_specs=config.translator_chain_specs,
+        cooldown_seconds=config.translator_cooldown,
     )
     cache = TranslationCache(
         max_size=config.cache_max_size,
@@ -370,6 +372,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             config.translator_api_key,
             config.translator_fallback_api_key,
             config.webhook_secret_token,
+            *(spec.api_key for spec in config.translator_chain_specs),
+            *(spec.email for spec in config.translator_chain_specs),
         ),
     )
     with contextlib.suppress(KeyboardInterrupt):

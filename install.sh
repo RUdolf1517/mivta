@@ -61,8 +61,8 @@ Automated Ubuntu/Debian installer and upgrader for mivta.
 
 Options:
   --token <TOKEN>          Telegram BOT_TOKEN from @BotFather
-  --provider <NAME>        google | openai | groq | gemini | openrouter | deepl | libretranslate
-  --api-key <KEY>          TRANSLATOR_API_KEY (for openai / groq / gemini / openrouter / deepl)
+  --provider <NAME>        google | mymemory | openai | groq | gemini | mistral | openrouter | deepl | libretranslate
+  --api-key <KEY>          TRANSLATOR_API_KEY (for openai / groq / gemini / mistral / openrouter / deepl)
   --api-url <URL>          Custom TRANSLATOR_API_URL
   --model <MODEL>          TRANSLATOR_MODEL for LLM provider
   --swap-lang <CODE>       Bidirectional auto-swap language (e.g. ru, pl)
@@ -616,7 +616,7 @@ configure_env_file() {
     fi
 
     if [ -z "$ARG_PROVIDER" ]; then
-      printf 'Translator provider [google/openai/groq/gemini/openrouter/deepl/libretranslate] (default: google): ' >/dev/tty
+      printf 'Translator provider [google/mymemory/openai/groq/gemini/mistral/openrouter/deepl/libretranslate] (default: google): ' >/dev/tty
       local input_prov=""
       IFS= read -r input_prov </dev/tty || true
       input_prov="${input_prov#"${input_prov%%[![:space:]]*}"}"
@@ -624,7 +624,7 @@ configure_env_file() {
       if [ -n "$input_prov" ]; then
         set_env_var "$env_file" "TRANSLATOR_PROVIDER" "$input_prov"
         case "$input_prov" in
-          openai|groq|gemini|openrouter|deepl)
+          openai|groq|gemini|mistral|openrouter|deepl)
             printf 'Enter TRANSLATOR_API_KEY for %s: ' "$input_prov" >/dev/tty
             local input_key=""
             IFS= read -r input_key </dev/tty || true

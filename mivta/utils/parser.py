@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-
-from aiogram.types import MessageEntity
+from typing import TYPE_CHECKING
 
 from mivta.translator.base import TranslationStyle, parse_style
 from mivta.utils.languages import resolve_language
+
+if TYPE_CHECKING:
+    from aiogram.types import MessageEntity
 
 # Leading language directives: either `>target` or `source>target` (no spaces around `>`)
 _TARGET_ONLY_RE = re.compile(r"^>(?P<tgt>[A-Za-z]{2,8}(?:-[A-Za-z]{2,6})?)$")
