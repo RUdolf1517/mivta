@@ -77,12 +77,15 @@ curl -fsS http://127.0.0.1:8080/healthz
 
 ---
 
-## 4. Docker Compose
+## 4. Docker Compose и готовый образ GHCR
+
+При каждом релизе публикуется мультиархитектурный образ `ghcr.io/rudolf1517/mivta:latest` (`linux/amd64` и `linux/arm64`):
 
 ```bash
 cp .env.example .env
 # Заполните BOT_TOKEN в .env
-docker compose up -d --build
+docker compose pull && docker compose up -d
+# Либо локальная сборка из исходников: docker compose up -d --build
 ```
 
 Контейнер работает от непривилегированного пользователя `mivta` (`UID 10001`), монтирует `./data` в `/app/data` и использует встроенный `HEALTHCHECK` (`python -m mivta --check`).
