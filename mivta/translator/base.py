@@ -28,6 +28,7 @@ LLM_PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
     "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
+    "mistral": ("https://api.mistral.ai/v1", "mistral-small-latest"),
     "openrouter": ("https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
 }
 
@@ -49,6 +50,17 @@ def parse_style(value: str) -> TranslationStyle | None:
         "форм": TranslationStyle.FORMAL,
     }
     return aliases.get(normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSpec:
+    """Per-provider settings for single-provider or multi-API failover chains."""
+
+    provider: str
+    api_key: str = ""
+    api_url: str = ""
+    model: str = ""
+    email: str = ""
 
 
 @dataclass(frozen=True, slots=True)

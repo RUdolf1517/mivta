@@ -9,16 +9,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from mivta.translator.base import LLM_PROVIDER_DEFAULTS, TranslationStyle, parse_style
+from mivta.translator.base import (
+    LLM_PROVIDER_DEFAULTS,
+    ProviderSpec,
+    TranslationStyle,
+    parse_style,
+)
 from mivta.utils.i18n import SUPPORTED_UI_LANGS
 from mivta.utils.languages import resolve_language
 
 KEYED_PROVIDERS: frozenset[str] = frozenset({*LLM_PROVIDER_DEFAULTS.keys(), "deepl"})
-SUPPORTED_PROVIDERS: frozenset[str] = frozenset({*KEYED_PROVIDERS, "google", "libretranslate"})
+SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
+    {*KEYED_PROVIDERS, "google", "libretranslate", "mymemory"}
+)
 VALID_LOG_LEVELS: frozenset[str] = frozenset(
     {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 )
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+_DISABLE_TOKENS: frozenset[str] = frozenset({"off", "none", "false", "-"})
 _WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
 MAX_INLINE_EXTRA_LANGS = 3
@@ -202,22 +210,140 @@ def _normalize_webhook(raw_url: str, raw_path: str | None) -> tuple[str, str]:
     return full_url, final_path
 
 
-def _parse_fallback_providers(raw: str, *, primary: str) -> tuple[str, ...]:
-    if not raw.strip():
-        return ()
-    fallbacks: list[str] = []
+def _parse_provider_list(raw: str, *, var_name: str) -> tuple[str, ...]:
     supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
+    items: list[str] = []
     for piece in raw.split(","):
         item = piece.strip().lower()
-        if not item or item == primary:
+        if not item:
             continue
         if item not in SUPPORTED_PROVIDERS:
             raise ConfigError(
-                f"Unsupported TRANSLATOR_FALLBACK_PROVIDER={item!r}; expected one of: {supported}"
+                f"Unsupported {var_name}={item!r}; expected one of: {supported}"
             )
-        if item not in fallbacks:
-            fallbacks.append(item)
-    return tuple(fallbacks)
+        if item not in items:
+            items.append(item)
+    return tuple(items)
+
+
+def _resolve_chain_names(merged: Mapping[str, str]) -> tuple[str, tuple[str, ...]]:
+    """Resolve `(primary_provider, fallback_providers)` from env variables."""
+    raw_chain = merged.get("TRANSLATOR_CHAIN", "").strip()
+    if raw_chain:
+        parsed_chain = _parse_provider_list(raw_chain, var_name="TRANSLATOR_CHAIN")
+        if not parsed_chain:
+            raise ConfigError("TRANSLATOR_CHAIN must name at least one provider")
+        return parsed_chain[0], parsed_chain[1:]
+
+    provider = merged.get("TRANSLATOR_PROVIDER", "google").strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
+        raise ConfigError(
+            f"Unsupported TRANSLATOR_PROVIDER={provider!r}; expected one of: {supported}"
+        )
+
+    has_explicit_fb = "TRANSLATOR_FALLBACK_PROVIDER" in merged
+    raw_fb = merged.get("TRANSLATOR_FALLBACK_PROVIDER", "").strip()
+    if raw_fb.lower() in _DISABLE_TOKENS:
+        return provider, ()
+    if raw_fb:
+        parsed_fb = _parse_provider_list(raw_fb, var_name="TRANSLATOR_FALLBACK_PROVIDER")
+        return provider, tuple(p for p in parsed_fb if p != provider)
+
+    # Zero-config out-of-the-box resilience: `google` automatically falls back to `mymemory`
+    # unless TRANSLATOR_FALLBACK_PROVIDER was explicitly set (e.g. to `none` or empty).
+    if provider == "google" and not has_explicit_fb:
+        return provider, ("mymemory",)
+    return provider, ()
+
+
+def _build_provider_specs(
+    primary: str,
+    fallbacks: tuple[str, ...],
+    merged: Mapping[str, str],
+    *,
+    allow_insecure_http: bool,
+) -> tuple[ProviderSpec, ...]:
+    """Build validated per-provider specs supporting both shared and `<PROVIDER>_*` env vars."""
+    shared_primary_key = merged.get("TRANSLATOR_API_KEY", "").strip()
+    shared_primary_url = merged.get("TRANSLATOR_API_URL", "").strip().rstrip("/")
+    shared_primary_model = merged.get("TRANSLATOR_MODEL", "").strip()
+
+    shared_fb_key = merged.get("TRANSLATOR_FALLBACK_API_KEY", "").strip()
+    shared_fb_url = merged.get("TRANSLATOR_FALLBACK_API_URL", "").strip().rstrip("/")
+    shared_fb_model = merged.get("TRANSLATOR_FALLBACK_MODEL", "").strip()
+    mymemory_email = merged.get("MYMEMORY_EMAIL", "").strip()
+
+    ordered = (primary, *fallbacks)
+    specs: list[ProviderSpec] = []
+    for idx, prov in enumerate(ordered):
+        prefix = prov.upper()
+        prov_key = merged.get(f"{prefix}_API_KEY", "").strip()
+        prov_url = merged.get(f"{prefix}_API_URL", "").strip().rstrip("/")
+        prov_model = merged.get(f"{prefix}_MODEL", "").strip()
+        preset_url, preset_model = LLM_PROVIDER_DEFAULTS.get(prov, ("", "gpt-4o-mini"))
+
+        if idx == 0:
+            key = shared_primary_key or prov_key
+            raw_url = shared_primary_url or prov_url
+            url_var = "TRANSLATOR_API_URL" if shared_primary_url else f"{prefix}_API_URL"
+            model = shared_primary_model or prov_model or preset_model
+            if prov in KEYED_PROVIDERS and not key:
+                raise ConfigError(
+                    f"TRANSLATOR_API_KEY (or {prefix}_API_KEY) is required when "
+                    f"primary provider is {prov!r}"
+                )
+        else:
+            if prov == "google":
+                key = ""
+            elif prov == "mymemory":
+                key = prov_key
+            else:
+                key = prov_key or shared_fb_key
+
+            if prov_url:
+                raw_url = prov_url
+                url_var = f"{prefix}_API_URL"
+            elif shared_fb_url and len(fallbacks) == 1:
+                raw_url = shared_fb_url
+                url_var = "TRANSLATOR_FALLBACK_API_URL"
+            else:
+                raw_url = ""
+                url_var = f"{prefix}_API_URL"
+
+            default_fb_model = preset_model if prov in LLM_PROVIDER_DEFAULTS else ""
+            model = prov_model or shared_fb_model or default_fb_model
+            if prov in KEYED_PROVIDERS and not key:
+                raise ConfigError(
+                    f"TRANSLATOR_FALLBACK_API_KEY (or {prefix}_API_KEY) is required when "
+                    f"fallback provider includes {prov!r}"
+                )
+
+        if raw_url:
+            _validate_api_url(
+                url_var,
+                raw_url,
+                has_api_key=bool(key),
+                allow_insecure_http=allow_insecure_http,
+            )
+        if idx == 1 and shared_fb_url and not raw_url:
+            _validate_api_url(
+                "TRANSLATOR_FALLBACK_API_URL",
+                shared_fb_url,
+                has_api_key=bool(shared_fb_key),
+                allow_insecure_http=allow_insecure_http,
+            )
+
+        specs.append(
+            ProviderSpec(
+                provider=prov,
+                api_key=key,
+                api_url=raw_url or preset_url,
+                model=model if prov in LLM_PROVIDER_DEFAULTS else "",
+                email=mymemory_email if prov == "mymemory" else "",
+            )
+        )
+    return tuple(specs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,10 +356,12 @@ class Config:
     translator_api_url: str = ""
     translator_model: str = "gpt-4o-mini"
     translator_timeout: float = 5.0
+    translator_cooldown: float = 30.0
     translator_fallback_providers: tuple[str, ...] = ()
     translator_fallback_api_key: str = ""
     translator_fallback_api_url: str = ""
     translator_fallback_model: str = ""
+    translator_chain_specs: tuple[ProviderSpec, ...] = ()
     translator_glossary: tuple[str, ...] = ()
 
     default_source_lang: str = "auto"
@@ -280,36 +408,30 @@ class Config:
                 "BOT_TOKEN is missing or invalid (expected Telegram token format '<id>:<secret>')"
             )
 
-        provider = merged.get("TRANSLATOR_PROVIDER", "google").strip().lower()
-        if provider not in SUPPORTED_PROVIDERS:
-            supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
-            raise ConfigError(
-                f"Unsupported TRANSLATOR_PROVIDER={provider!r}; expected one of: {supported}"
-            )
-
-        api_key = merged.get("TRANSLATOR_API_KEY", "").strip()
-        if provider in KEYED_PROVIDERS and not api_key:
-            raise ConfigError(
-                f"TRANSLATOR_API_KEY is required when TRANSLATOR_PROVIDER={provider!r}"
-            )
-
         allow_insecure_http = _parse_bool(
             "ALLOW_INSECURE_HTTP_API",
             merged.get("ALLOW_INSECURE_HTTP_API", "false"),
         )
 
-        preset_url, preset_model = LLM_PROVIDER_DEFAULTS.get(provider, ("", "gpt-4o-mini"))
-        raw_url = merged.get("TRANSLATOR_API_URL", "").strip().rstrip("/")
-        if raw_url:
+        provider, fallback_providers = _resolve_chain_names(merged)
+        chain_specs = _build_provider_specs(
+            provider,
+            fallback_providers,
+            merged,
+            allow_insecure_http=allow_insecure_http,
+        )
+        primary_spec = chain_specs[0]
+
+        fallback_api_key = merged.get("TRANSLATOR_FALLBACK_API_KEY", "").strip()
+        fallback_api_url = merged.get("TRANSLATOR_FALLBACK_API_URL", "").strip().rstrip("/")
+        fallback_model = merged.get("TRANSLATOR_FALLBACK_MODEL", "").strip()
+        if fallback_api_url and not fallback_providers:
             _validate_api_url(
-                "TRANSLATOR_API_URL",
-                raw_url,
-                has_api_key=bool(api_key),
+                "TRANSLATOR_FALLBACK_API_URL",
+                fallback_api_url,
+                has_api_key=bool(fallback_api_key),
                 allow_insecure_http=allow_insecure_http,
             )
-        api_url = raw_url or preset_url
-        raw_model = merged.get("TRANSLATOR_MODEL", "").strip()
-        model = raw_model or preset_model
 
         timeout = _parse_float(
             "TRANSLATOR_TIMEOUT",
@@ -317,27 +439,11 @@ class Config:
             minimum=0.0,
             exclusive_min=True,
         )
-
-        fallback_providers = _parse_fallback_providers(
-            merged.get("TRANSLATOR_FALLBACK_PROVIDER", ""),
-            primary=provider,
+        cooldown = _parse_float(
+            "TRANSLATOR_COOLDOWN",
+            merged.get("TRANSLATOR_COOLDOWN", "30.0"),
+            minimum=0.0,
         )
-        fallback_api_key = merged.get("TRANSLATOR_FALLBACK_API_KEY", "").strip()
-        fallback_api_url = merged.get("TRANSLATOR_FALLBACK_API_URL", "").strip().rstrip("/")
-        fallback_model = merged.get("TRANSLATOR_FALLBACK_MODEL", "").strip()
-        for fb in fallback_providers:
-            if fb in KEYED_PROVIDERS and not fallback_api_key:
-                raise ConfigError(
-                    "TRANSLATOR_FALLBACK_API_KEY is required when "
-                    f"fallback provider includes {fb!r}"
-                )
-        if fallback_api_url:
-            _validate_api_url(
-                "TRANSLATOR_FALLBACK_API_URL",
-                fallback_api_url,
-                has_api_key=bool(fallback_api_key),
-                allow_insecure_http=allow_insecure_http,
-            )
 
         glossary = _parse_glossary(merged.get("TRANSLATOR_GLOSSARY", ""))
 
@@ -353,7 +459,7 @@ class Config:
 
         raw_swap = merged.get("DEFAULT_SWAP_LANG", "").strip()
         default_swap = ""
-        if raw_swap and raw_swap.lower() not in ("off", "none", "false", "-"):
+        if raw_swap and raw_swap.lower() not in _DISABLE_TOKENS:
             resolved_swap = resolve_language(raw_swap, allow_auto=False)
             if resolved_swap is None:
                 raise ConfigError(f"Unsupported DEFAULT_SWAP_LANG={raw_swap!r}")
@@ -448,17 +554,26 @@ class Config:
                 f"Unsupported LOG_LEVEL={log_level!r}; expected one of {sorted(VALID_LOG_LEVELS)}"
             )
 
+        preset_model = LLM_PROVIDER_DEFAULTS.get(provider, ("", "gpt-4o-mini"))[1]
+        effective_model = (
+            primary_spec.model
+            or merged.get("TRANSLATOR_MODEL", "").strip()
+            or preset_model
+        )
+
         return cls(
             bot_token=bot_token,
             translator_provider=provider,
-            translator_api_key=api_key,
-            translator_api_url=api_url,
-            translator_model=model,
+            translator_api_key=primary_spec.api_key,
+            translator_api_url=primary_spec.api_url,
+            translator_model=effective_model,
             translator_timeout=timeout,
+            translator_cooldown=cooldown,
             translator_fallback_providers=fallback_providers,
             translator_fallback_api_key=fallback_api_key,
             translator_fallback_api_url=fallback_api_url,
             translator_fallback_model=fallback_model,
+            translator_chain_specs=chain_specs,
             translator_glossary=glossary,
             default_source_lang=default_source,
             default_target_lang=default_target,

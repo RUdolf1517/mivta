@@ -77,13 +77,15 @@
 | :--- | :---: | :---: | :--- |
 | `groq` | Да | 1 батч-запрос на 3 стиля | `llama-3.3-70b-versatile` (~150–250 мс) |
 | `gemini` | Да | 1 батч-запрос на 3 стиля | `gemini-2.5-flash` |
+| `mistral` | Да | 1 батч-запрос на 3 стиля | `mistral-small-latest` |
 | `openrouter` | Да | 1 батч-запрос на 3 стиля | `openai/gpt-4o-mini` |
 | `openai` | Да | 1 батч-запрос на 3 стиля | `gpt-4o-mini` или любой совместимый URL (Ollama, vLLM) |
 | `deepl` | Да | Нативный `formality` | Автовыбор `api-free.deepl.com` (`:fx`) / `api.deepl.com` |
 | `libretranslate` | Опционально | Нет | Публичный или собственный инстанс LibreTranslate |
-| `google` | Не нужен | Нет | Запуск «из коробки» только с `BOT_TOKEN`, авто-обход `429` на VPS |
+| `google` | Не нужен | Нет | Запуск «из коробки» с автоматической подстраховкой `google → mymemory` |
+| `mymemory` | Не нужен | Нет | Бесплатный резерв без ключа (`MYMEMORY_EMAIL` поднимает квоту до 50k симв./сут) |
 
-Цепочки резерва (`TRANSLATOR_FALLBACK_PROVIDER=google`) и глоссарий непереводимых слов (`TRANSLATOR_GLOSSARY`) описаны в [docs/providers.md](docs/providers.md).
+Автоматическая замена недоступных API с карантином (`TRANSLATOR_CHAIN=groq,gemini,google,mymemory`) и глоссарий непереводимых слов (`TRANSLATOR_GLOSSARY`) описаны в [docs/providers.md](docs/providers.md).
 
 ## Почему mivta
 

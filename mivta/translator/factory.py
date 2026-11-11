@@ -1,17 +1,27 @@
-"""Factory for constructing a Translator instance (including LLM presets and fallbacks)."""
+"""Factory for constructing a Translator instance (including LLM presets and failover chains)."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 
 import httpx
 
 from mivta import __version__
-from mivta.translator.base import LLM_PROVIDER_DEFAULTS, Translator, TranslatorError
+from mivta.translator.base import (
+    LLM_PROVIDER_DEFAULTS,
+    ProviderSpec,
+    Translator,
+    TranslatorError,
+)
 from mivta.translator.deepl import DeepLTranslator
-from mivta.translator.fallback import FallbackTranslator
+from mivta.translator.fallback import (
+    DEFAULT_UNAVAILABLE_COOLDOWN,
+    FallbackTranslator,
+)
 from mivta.translator.google import GoogleTranslator
 from mivta.translator.libre import LibreTranslateTranslator
+from mivta.translator.mymemory import MyMemoryTranslator
 from mivta.translator.openai import OpenAITranslator
 
 
@@ -35,6 +45,7 @@ def _create_single_translator(
     api_key: str = "",
     api_url: str = "",
     model: str = "",
+    email: str = "",
     max_length: int = 500,
     glossary: Sequence[str] = (),
 ) -> Translator:
@@ -70,6 +81,14 @@ def _create_single_translator(
             base_url=api_url,
             max_length=max_length,
         )
+    if normalized == "mymemory":
+        return MyMemoryTranslator(
+            client,
+            base_url=api_url,
+            api_key=api_key,
+            email=email,
+            max_length=max_length,
+        )
     raise TranslatorError(f"Unknown translator provider: {provider!r}")
 
 
@@ -80,45 +99,70 @@ def create_translator(
     api_key: str = "",
     api_url: str = "",
     model: str = "",
+    email: str = "",
     max_length: int = 500,
     glossary: Sequence[str] = (),
     fallback_providers: Sequence[str] = (),
     fallback_api_key: str = "",
     fallback_api_url: str = "",
     fallback_model: str = "",
+    provider_specs: Sequence[ProviderSpec] = (),
+    cooldown_seconds: float = DEFAULT_UNAVAILABLE_COOLDOWN,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Translator:
-    """Instantiate the requested translation provider and optional fallback chain."""
-    primary = _create_single_translator(
-        provider,
-        client,
-        api_key=api_key,
-        api_url=api_url,
-        model=model,
-        max_length=max_length,
-        glossary=glossary,
-    )
-    if not fallback_providers:
-        return primary
+    """Instantiate the requested translation provider or multi-API failover chain."""
+    if provider_specs:
+        specs = list(provider_specs)
+    else:
+        specs = [
+            ProviderSpec(
+                provider=provider,
+                api_key=api_key,
+                api_url=api_url,
+                model=model,
+                email=email,
+            )
+        ]
+        for fb_name in fallback_providers:
+            specs.append(
+                ProviderSpec(
+                    provider=fb_name,
+                    api_key=fallback_api_key,
+                    api_url=fallback_api_url,
+                    model=fallback_model,
+                )
+            )
 
-    chain: list[Translator] = [primary]
-    seen = {primary.name}
-    for fb_name in fallback_providers:
-        norm_fb = fb_name.strip().lower()
-        if not norm_fb or norm_fb in seen:
+    chain: list[Translator] = []
+    seen: set[str] = set()
+    for spec in specs:
+        norm = spec.provider.strip().lower()
+        if not norm or norm in seen:
             continue
-        seen.add(norm_fb)
+        seen.add(norm)
         chain.append(
             _create_single_translator(
-                norm_fb,
+                norm,
                 client,
-                api_key=fallback_api_key,
-                api_url=fallback_api_url,
-                model=fallback_model,
+                api_key=spec.api_key,
+                api_url=spec.api_url,
+                model=spec.model,
+                email=spec.email,
                 max_length=max_length,
                 glossary=glossary,
             )
         )
 
+    if not chain:
+        raise TranslatorError(f"Unknown translator provider: {provider!r}")
     if len(chain) == 1:
-        return primary
-    return FallbackTranslator(chain)
+        return chain[0]
+
+    base_cd = max(0.0, cooldown_seconds)
+    return FallbackTranslator(
+        chain,
+        unavailable_cooldown=base_cd,
+        rate_limit_cooldown=base_cd * 2.0,
+        auth_cooldown=base_cd * 10.0,
+        clock=clock,
+    )

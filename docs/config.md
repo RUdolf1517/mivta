@@ -15,21 +15,24 @@ python -m mivta --check
 | Переменная | По умолчанию | Описание |
 | :--- | :--- | :--- |
 | `BOT_TOKEN` | *(обязательна)* | Токен бота от `@BotFather` (формат `123456:ABC...`). |
-| `TRANSLATOR_PROVIDER` | `google` | Основной провайдер: `google`, `groq`, `gemini`, `openrouter`, `openai`, `deepl`, `libretranslate`. |
-| `TRANSLATOR_API_KEY` | `""` | Ключ API (обязателен для `groq`, `gemini`, `openrouter`, `openai`, `deepl`). |
-| `TRANSLATOR_API_URL` | *(по пресету)* | Переопределение базового URL API. При передаче `API_KEY` на не-loopback хост требуется `https://`. |
-| `TRANSLATOR_MODEL` | *(по пресету)* | Переопределение модели для LLM-провайдеров. |
+| `TRANSLATOR_PROVIDER` | `google` | Основной провайдер: `google`, `mymemory`, `groq`, `gemini`, `mistral`, `openrouter`, `openai`, `deepl`, `libretranslate`. |
+| `TRANSLATOR_CHAIN` | `""` | Полная цепочка приоритетов через запятую (например, `groq,gemini,google,mymemory`); заменяет пару `TRANSLATOR_PROVIDER` + `TRANSLATOR_FALLBACK_PROVIDER`. |
+| `TRANSLATOR_API_KEY` | `""` | Ключ основного провайдера (либо используйте именные переменные `GROQ_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `DEEPL_API_KEY`). |
+| `TRANSLATOR_API_URL` | *(по пресету)* | Переопределение базового URL API (либо `<PROVIDER>_API_URL`). При передаче `API_KEY` на не-loopback хост требуется `https://`. |
+| `TRANSLATOR_MODEL` | *(по пресету)* | Переопределение модели LLM (либо `<PROVIDER>_MODEL`). |
 | `TRANSLATOR_TIMEOUT` | `5.0` | Таймаут HTTP-запроса к провайдеру в секундах (`> 0`). |
+| `TRANSLATOR_COOLDOWN` | `30.0` | Базовое время карантина упавшего API в секундах (`30s` на таймаут/`5xx`, `2×` на `429`, `10×` на `401/403`; `0` отключает карантин). |
+| `MYMEMORY_EMAIL` | `""` | Контактный email для `mymemory` (бесплатно увеличивает дневной лимит с 5 000 до 50 000 символов). |
 | `ALLOW_INSECURE_HTTP_API` | `false` | Разрешить `http://` с `API_KEY` для не-локальных адресов (например, Ollama в закрытой домашней/VPC сети). |
 
 ### Резервирование и глоссарий
 
 | Переменная | По умолчанию | Описание |
 | :--- | :--- | :--- |
-| `TRANSLATOR_FALLBACK_PROVIDER` | `""` | Резервный провайдер или список через запятую (например, `google` или `libretranslate,google`). |
-| `TRANSLATOR_FALLBACK_API_KEY` | `""` | Ключ API для резервного провайдера (если отличается). |
-| `TRANSLATOR_FALLBACK_API_URL` | `""` | Кастомный URL для резервного провайдера. |
-| `TRANSLATOR_FALLBACK_MODEL` | `""` | Модель для резервного LLM-провайдера. |
+| `TRANSLATOR_FALLBACK_PROVIDER` | `mymemory` *(для `google`)* | Резервный провайдер или список через запятую (`none` — отключить резерв). |
+| `TRANSLATOR_FALLBACK_API_KEY` | `""` | Общий ключ API для резервного провайдера (если не задан именной `<PROVIDER>_API_KEY`). |
+| `TRANSLATOR_FALLBACK_API_URL` | `""` | Кастомный URL для одиночного резервного провайдера (либо `<PROVIDER>_API_URL`). |
+| `TRANSLATOR_FALLBACK_MODEL` | `""` | Модель для резервного LLM-провайдера (либо `<PROVIDER>_MODEL`). |
 | `TRANSLATOR_GLOSSARY` | `""` | Слова и названия через запятую, которые не должны переводиться. |
 
 ### Настройки перевода и интерфейса по умолчанию
