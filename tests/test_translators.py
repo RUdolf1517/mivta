@@ -321,3 +321,38 @@ async def test_fallback_translator_recovers_on_429_and_400_but_not_local_validat
         assert result.translated_text == "Fallback translation"
         assert result.provider == "google"
         assert len(hit_urls) == 2
+
+
+async def test_google_translator_429_failover_to_clients5_with_sticky_endpoint() -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        seen_hosts.append(host)
+        assert "Mozilla/5.0" in request.headers.get("User-Agent", "")
+        if host == "translate.googleapis.com":
+            return httpx.Response(429, text="unusual traffic")
+        if host == "clients5.google.com":
+            if request.url.params["sl"] == "auto":
+                return httpx.Response(200, json=[["Hello world", "ru"]])
+            return httpx.Response(200, json=["Hello explicit"])
+        return httpx.Response(502, text="bad gateway")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gt = GoogleTranslator(client)
+        r1 = await gt.translate(TranslationRequest(text="Привет мир", target_lang="en"))
+        assert r1.translated_text == "Hello world"
+        assert r1.source_lang == "ru"
+        assert seen_hosts == ["translate.googleapis.com", "clients5.google.com"]
+
+        # Second call goes straight to sticky `clients5.google.com` without hitting 429 again!
+        r2 = await gt.translate(
+            TranslationRequest(text="Привет", source_lang="ru", target_lang="en")
+        )
+        assert r2.translated_text == "Hello explicit"
+        assert seen_hosts == [
+            "translate.googleapis.com",
+            "clients5.google.com",
+            "clients5.google.com",
+        ]
+
