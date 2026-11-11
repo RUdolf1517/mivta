@@ -130,12 +130,12 @@ curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | 
   --swap-lang ru
 ```
 
-Docker Compose:
+Docker Compose (готовый мультиархитектурный образ из GHCR или локальная сборка):
 
 ```bash
 git clone https://github.com/RUdolf1517/mivta.git && cd mivta
 cp .env.example .env   # укажите BOT_TOKEN
-docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
 
 Локальный запуск из исходников:

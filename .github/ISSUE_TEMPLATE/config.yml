@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/RUdolf1517/mivta/security/advisories/new
+    about: Report a security or privacy vulnerability privately (do not open a public issue — see SECURITY.md).
+  - name: Public Telegram bot (@mivtabot)
+    url: https://t.me/mivtabot
+    about: Test Inline Mode and Secretary Mode on the live public instance.

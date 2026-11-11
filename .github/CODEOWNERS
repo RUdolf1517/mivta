@@ -1,0 +1,11 @@
+# Review ownership. The repository is small enough that one owner reviews
+# everything; the entries below name who must approve a change to a file whose
+# rules are stricter than the general code style.
+
+* @RUdolf1517
+
+# Security policy, contributor boundaries, privileged installer, and CI/release pipelines.
+/SECURITY.md            @RUdolf1517
+/CONTRIBUTING.md        @RUdolf1517
+/install.sh             @RUdolf1517
+/.github/workflows/     @RUdolf1517

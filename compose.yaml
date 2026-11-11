@@ -1,5 +1,6 @@
 services:
   mivta:
+    image: ghcr.io/rudolf1517/mivta:latest
     build: .
     restart: unless-stopped
     env_file:
