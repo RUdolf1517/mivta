@@ -4,284 +4,169 @@
 
 **מבטא** — *mivta*: произношение, выражение, интонация
 
-**Перевод сообщений прямо в чатах Telegram: Inline Mode (везде) + Secretary Mode (без `via @bot`).**
+**Переводи реплику прямо в чате — не трогай переписку.**
 
-[![CI](https://github.com/RUdolf1517/mivta/actions/workflows/ci.yml/badge.svg)](https://github.com/RUdolf1517/mivta/actions/workflows/ci.yml)
+[![ci](https://github.com/RUdolf1517/mivta/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RUdolf1517/mivta/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/RUdolf1517/mivta?style=flat-square&color=0b3d91)](https://github.com/RUdolf1517/mivta/releases/latest)
+[![bot](https://img.shields.io/badge/telegram-%40mivtabot-2ca5e0?style=flat-square)](https://t.me/mivtabot)
 [![python](https://img.shields.io/badge/python-3.11%2B-0b3d91?style=flat-square)](https://www.python.org/)
-[![aiogram](https://img.shields.io/badge/aiogram-3.x-2ca5e0?style=flat-square)](https://docs.aiogram.dev/)
 [![license](https://img.shields.io/badge/license-MIT-0b3d91?style=flat-square)](LICENSE)
+
+[Подключить](#подключить) · [Использование](#использование) · [Провайдеры](#провайдеры) · [Почему mivta](#почему-mivta) · [Сравнение](#какой-инструмент-выбрать) · [Self-host](#свой-сервер) · [Документация](#документация)
 
 </div>
 
 ---
 
-`mivta` — минималистичный Telegram-бот для мгновенного перевода собственных сообщений прямо внутри переписки через официальный **Telegram Bot API** (без сторонних MTProto-клиентов и юзерботов):
+`mivta` переводит ваши исходящие сообщения прямо внутри чата Telegram через официальный **Bot API** — без MTProto-юзерботов и передачи сессии аккаунта. В **Inline Mode** (`@mivtabot текст`) бот работает в любых личных чатах, группах и каналах, предлагая сразу карточки разных стилей или выбранных языков. В **Secretary Mode / Автоматизации чатов** (`> текст`) бот на лету заменяет отправленное сообщение или подпись к файлу в личном чате 1-на-1 чистым переводом **вообще без системной метки `via @mivtabot`**, сохраняя жирный шрифт, ссылки, код и эмодзи.
 
-1. **Inline Mode (`@BotUsername текст`)** — основной универсальный режим, работает в любых личных чатах, группах и каналах (поддерживает выдачу сразу нескольких карточек стилей или избранных языков).
-2. **Secretary Mode / Автоматизация чатов (`> текст`)** — режим на базе официального Bot API для личных чатов 1-на-1: заменяет отправленные текстовые сообщения и подписи к фото/файлам (`caption`) переводом на лету **вообще без системной плашки `via @bot`**, сохраняя форматирование (`bold`, `italic`, ссылки, код).
+Чего `mivta` не делает намеренно: не трогает обычные сообщения без префикса `>` и никогда не редактирует входящие реплики собеседника; не переводит пересланные сообщения и голосовые в личке с самим ботом; не добавляет к переводу подписи, ссылки или рекламу; не записывает тексты сообщений и переводов ни в базу, ни в логи.
 
-Что бот принципиально **не делает**:
-- не переводит личные и пересланные сообщения в диалоге с самим ботом;
-- не принимает голосовые сообщения и аудио;
-- не добавляет к переводу подписи, ссылки или водяные знаки;
-- не записывает тексты сообщений или переводов на диск и в логи (в SQLite хранятся только коды языков/стиля пользователя и метаданные подключения Secretary Mode).
+```text
+# В любом чате, группе или канале (Inline Mode):
+@mivtabot Ну чё, созвонимся завтра в 15:00?
+  ├─ neutral → Shall we hop on a call tomorrow at 15:00?
+  ├─ casual  → Wanna jump on a call tomorrow at 3pm?
+  └─ formal  → Could we schedule a call for tomorrow at 15:00?
 
----
-
-## Быстрый старт
-
-### 1. Настройка бота в `@BotFather`
-
-Создайте бота в [`@BotFather`](https://t.me/BotFather) командой `/newbot`, получите `BOT_TOKEN` и выставьте следующие параметры в меню бота (надёжнее через текстовую команду `/mybots` → выберите бота → **Bot Settings**):
-
-| Параметр в `@BotFather` | Рекомендуемое значение | Почему именно так |
-| :--- | :--- | :--- |
-| **Inline Mode** (`/setinline`) | **Enabled (Включён)** | Обязательно. Основной режим вызова `@BotUsername текст` в поле ввода любого чата. |
-| **Inline Feedback** (`/setinlinefeedback`) | **Disabled (`0%`, выключен)** | `mivta` не собирает статистику `chosen_inline_result` и не логирует выбранные переводы. Отключение избавляет бота от лишних апдейтов с текстом ваших сообщений и повышает приватность. |
-| **Secretary Mode** (*Bot Settings → Secretary Mode*) | **Enabled (Включён)** | Позволяет подключить бота в **Настройки → Автоматизация чатов** (*Chat Automation*) и переводить сообщения и подписи к файлам в личных чатах **без метки `via @bot`**. |
-| **Threaded Mode** (*Bot Settings → Threaded Mode*) | **Disabled (Выключен)** | Включать **не нужно**. Бот не ведёт диалоговых сессий в ЛС — при включённом Threaded Mode переход по кнопке «Настройки» из Inline Mode открывал бы лишний список топиков вместо мгновенного экрана `/settings`. |
-
-### 2. Локальный запуск
-
-```bash
-git clone https://github.com/RUdolf1517/mivta.git
-cd mivta
-
-python3 -m venv .venv
-.venv/bin/pip install -U pip
-.venv/bin/pip install -r requirements.txt
-
-cp .env.example .env
-# Укажите BOT_TOKEN (и при необходимости провайдера перевода) в .env
-
-.venv/bin/python -m mivta
+# В личном чате 1-на-1 с подключённой Автоматизацией чатов (без плашки via @mivtabot):
+> Добрый день! Отправляю обновлённый макет и `config.yaml`.
+  ──► Good afternoon! Sending over the updated mockup and `config.yaml`.
 ```
 
----
+## Подключить
+
+Готовый публичный экземпляр — **[`@mivtabot`](https://t.me/mivtabot)** (интерфейс автоматически подстраивается под русский или английский язык клиента Telegram):
+
+1. **Inline Mode (сразу, без настройки)** — в поле ввода любого чата наберите `@mivtabot ` и текст сообщения.
+2. **Secretary Mode (без метки `via @mivtabot` в личных чатах, работает и без Telegram Premium)**:
+   - откройте [`@mivtabot`](https://t.me/mivtabot) и нажмите `/start`;
+   - в настройках Telegram откройте **Настройки → Автоматизация чатов** (*Settings → Chat Automation*) → добавьте `@mivtabot` и включите право **Ответы на сообщения** (*Reply to messages*);
+   - начинайте сообщения или подписи к фото/файлам, которые нужно перевести, с символа `>`.
 
 ## Использование
 
-### Режим 1: Inline Mode (любые чаты, группы и каналы)
-
-Введите в поле сообщения любого чата:
-
 ```text
-@BotUsername Привет, как дела?
+@mivtabot Привет, как дела?                # Inline Mode по вашим настройкам (/settings)
+@mivtabot >de Привет, мир!                 # разовая смена целевого языка на немецкий
+@mivtabot ru>pl Добрый день                # явная языковая пара: русский → польский
+@mivtabot !formal Добрый день, коллеги     # разовый выбор стиля (neutral / casual / formal)
+
+> Привет, как дела?                        # Secretary Mode: замена на месте без via @mivtabot
+>pl !casual Буду через 10 минут            # польский + разговорный стиль в личном чате
 ```
 
-- При использовании провайдера с поддержкой стилей (`groq`, `openai`, `gemini`, `openrouter`, `deepl`) бот за один запрос покажет **до 3 карточек регистров** (`нейтральный`, `разговорный`, `формальный`).
-- Если настроить дополнительные языки (`/langs pl de` или в меню `/settings`), бот сразу отдаст **карточки на нескольких избранных языках** для отправки в одно касание.
+Если включить двустороннюю пару (`/swap ru` при основном языке `en`), переключать языки вручную не нужно: текст на русском переводится на английский, а текст на английском — автоматически обратно на русский и в Inline Mode, и в Secretary Mode.
 
-Быстрые одноразовые модификаторы прямо в строке ввода:
+| Команда в `@mivtabot` | Действие |
+| :--- | :--- |
+| `/settings` | Интерактивное меню языков, `⇄` авто-смены, доп. карточек Inline и стиля |
+| `/lang <код>` | Основной язык перевода по умолчанию (`/lang en`, `/lang de`, `/lang pl`) |
+| `/swap <код\|off>` | Парный язык двустороннего авто-разворота (`/swap ru`, выключить: `/swap off`) |
+| `/langs <коды\|off>` | До 3 дополнительных языков карточек в Inline Mode (`/langs pl de`) |
+| `/source <auto\|код>` | Автоопределение (`/source auto`) или фиксированный исходный язык |
+| `/style <стиль>` | Регистр по умолчанию: `neutral`, `casual` или `formal` |
+| `/ui <ru\|en\|auto>` | Переключить язык меню и подсказок самого бота |
+| `/privacy`, `/reset` | Политика хранения данных и мгновенное удаление своих настроек из SQLite |
 
-```text
-@BotUsername >de Привет, мир!              # перевести это сообщение на немецкий
-@BotUsername ru>pl Добрый день             # явная языковая пара: русский → польский
-@BotUsername auto>ja Привет                # автоопределение → японский
-@BotUsername !formal Добрый день, коллеги  # формальный регистр
-@BotUsername >fr !casual Ну чё, погнали?   # французский + разговорный стиль
-```
+## Провайдеры
 
-### Режим 2: Secretary Mode / Chat Automation (личные чаты 1-на-1, без `via @bot`)
+При запуске на своём сервере бэкенд перевода выбирается переменной `TRANSLATOR_PROVIDER`:
 
-Начиная с обновлений Telegram 2026 года, подключить бота к личному аккаунту можно даже **без подписки Telegram Premium** — в `@BotFather` настройка называется **Secretary Mode** (ранее *Business Mode*), а в настройках Telegram — **Автоматизация чатов / Chat Automation**:
-
-1. В `@BotFather` отправьте `/mybots` → выберите бота → **Bot Settings → Secretary Mode → Turn on**.
-2. Откройте личный чат со своим ботом, нажмите `/start`, затем в настройках Telegram откройте **Настройки → Автоматизация чатов** (*Settings → Chat Automation* / *Telegram для бизнеса → Чат-боты*) и вставьте точный `@BotUsername` (без `https://t.me/` и пробелов).
-3. Выберите чаты и убедитесь, что включены **Чтение сообщений** и **Ответы на сообщения** (*Manage Messages → Reply to messages*).
-4. В любом подключённом личном чате начните текстовое сообщение **или подпись к фото/документу/видео** с префикса `>`:
-
-```text
-> Привет, как дела?                # перевод по вашим настройкам (/settings)
->de Привет, мир!                   # перевод на немецкий
-ru>pl Добрый день                  # явная пара: русский → польский
-> !formal Добрый день, коллеги     # стиль для конкретного сообщения
-```
-
-### Сохранение форматирования, кода и ссылок
-
-- В обоих режимах участки `` `inline code` ``, блоки ```` ```code``` ````, URL-ссылки (`https://...`), email и `@username` защищены от искажения переводчиком.
-- В Inline Mode участки `` `code` `` и ```` ```code``` ```` автоматически преобразуются в нативные моноширинные `MessageEntity` Telegram.
-- В Secretary Mode сохраняется форматирование Telegram (`bold`, `italic`, `underline`, `strikethrough`, `spoiler`, `blockquote`, `text_link`, `code`, `pre`, `custom_emoji`) с точным пересчётом UTF-16 смещений.
-
-### Персональные настройки пользователя
-
-Настройки сохраняются в SQLite за `user_id` и действуют одинаково и в Inline Mode, и в Secretary Mode (язык самого интерфейса **EN / RU** определяется автоматически по языку Telegram-клиента):
-
-- `/settings` — интерактивное меню выбора языка перевода, `⇄` авто-смены, доп. карточек Inline, исходного языка и стиля;
-- `/lang <code>` — основной язык перевода по умолчанию (`/lang en`, `/lang de`, `/lang pl`);
-- `/swap <code|off>` — двусторонний авто-разворот языковой пары: если целевой язык `en`, а парный `ru` (или `pl`), то текст на английском автоматически переводится на `ru`/`pl`, а остальной — на `en`;
-- `/langs <codes|off>` — до 3 дополнительных языков карточек в Inline Mode (`/langs pl de`, отключить: `/langs off`);
-- `/source <auto|code>` — включить автоопределение (`/source auto`) или зафиксировать исходный язык (`/source ru`);
-- `/style <neutral|casual|formal>` — задать стиль перевода (`нейтральный`, `разговорный`, `формальный`);
-- `/ui <en|ru|auto>` — переключить язык интерфейса бота (`EN` / `RU`);
-- `/privacy` и `/reset` — политика конфиденциальности и мгновенное удаление своих настроек из SQLite.
-
----
-
-## Провайдеры перевода, резервирование и глоссарий
-
-Компонент `mivta.translator` полностью независим от Telegram (`aiogram`) и SQLite.
-
-| `TRANSLATOR_PROVIDER` | Ключ API | Стили (`neutral` / `casual` / `formal`) | Модель / Endpoint по умолчанию |
+| Провайдер | Ключ API | Стили (`neutral` / `casual` / `formal`) | По умолчанию |
 | :--- | :---: | :---: | :--- |
-| `groq` | Да | **Полная** (1 батч-запрос на 3 стиля) | `llama-3.3-70b-versatile` (`api.groq.com/openai/v1`, ~150–250 мс) |
-| `gemini` | Да | **Полная** (1 батч-запрос на 3 стиля) | `gemini-2.5-flash` (`generativelanguage.googleapis.com`) |
-| `openrouter` | Да | **Полная** (1 батч-запрос на 3 стиля) | `openai/gpt-4o-mini` (`openrouter.ai/api/v1`) |
-| `openai` | Да | **Полная** (1 батч-запрос на 3 стиля) | `gpt-4o-mini` (`api.openai.com/v1` или любой совместимый URL) |
-| `deepl` | Да | **Нативная** (`default` / `prefer_less` / `prefer_more`) | Автовыбор `api-free.deepl.com` (`:fx`) или `api.deepl.com` + XML-теги |
-| `libretranslate` | Опционально | Нет | Self-hosted или публичный инстанс LibreTranslate |
-| `google` | Не нужен | Нет | Быстрый запуск «из коробки» только с `BOT_TOKEN` |
+| `groq` | Да | 1 батч-запрос на 3 стиля | `llama-3.3-70b-versatile` (~150–250 мс) |
+| `gemini` | Да | 1 батч-запрос на 3 стиля | `gemini-2.5-flash` |
+| `openrouter` | Да | 1 батч-запрос на 3 стиля | `openai/gpt-4o-mini` |
+| `openai` | Да | 1 батч-запрос на 3 стиля | `gpt-4o-mini` или любой совместимый URL (Ollama, vLLM) |
+| `deepl` | Да | Нативный `formality` | Автовыбор `api-free.deepl.com` (`:fx`) / `api.deepl.com` |
+| `libretranslate` | Опционально | Нет | Публичный или собственный инстанс LibreTranslate |
+| `google` | Не нужен | Нет | Запуск «из коробки» только с `BOT_TOKEN`, авто-обход `429` на VPS |
 
-Пример конфигурации с быстрым пресетом Groq, автоматическим откатом на `google` при ошибках/лимитах и мини-глоссарием непереводимых терминов:
+Цепочки резерва (`TRANSLATOR_FALLBACK_PROVIDER=google`) и глоссарий непереводимых слов (`TRANSLATOR_GLOSSARY`) описаны в [docs/providers.md](docs/providers.md).
 
-```dotenv
-TRANSLATOR_PROVIDER=groq
-TRANSLATOR_API_KEY=gsk_...
-TRANSLATOR_FALLBACK_PROVIDER=google
-TRANSLATOR_GLOSSARY=mivta, Kubernetes, PostgreSQL
-```
+## Почему mivta
 
----
+| | |
+| :--- | :--- |
+| **Трогает только помеченное** | Обычные реплики без префикса `>` и входящие сообщения собеседника никогда не редактируются. Если внешний API вернул ошибку, исходное сообщение остаётся нетронутым. |
+| **Ноль текстов на диске и в логах** | В SQLite хранятся только числовой `user_id` и коды выбранных языков/стиля. Временный кэш в памяти индексируется 16-байтным BLAKE2b-хэшем и очищается по TTL, а фильтр логов вырезает токены и ключи. |
+| **Двусторонняя пара `⇄` без ручных префиксов** | С настроенным `/swap` бот сам разворачивает направление перевода (`en ⇄ ru`, `en ⇄ pl` и др.): мгновенно по алфавиту для разных письменностей и за один запрос для LLM на одном алфавите. |
+| **Код, ссылки и разметка остаются целыми** | Участки `` `code` ``, блоки ```` ```pre``` ````, URL, email и `@username` защищены от искажения, а `bold`, `italic`, `spoiler` и `text_link` восстанавливаются с пересчётом UTF-16 смещений. |
+| **Не сжигает лимиты при быстрой печати** | В Inline Mode быстрые нажатия объединяются коротким окном дебаунса (`0 мс` при попадании в кэш), а устаревший запрос отменяется до обращения к API провайдера. |
 
-## Переменные окружения
+## Какой инструмент выбрать
 
-| Переменная | По умолчанию | Описание |
+Таблица ниже сравнивает реальную область применения разных способов перевода в Telegram.
+
+| Инструмент | Где работает лучше всего | Ограничение |
 | :--- | :--- | :--- |
-| `BOT_TOKEN` | *(обязательна)* | Токен Telegram-бота от `@BotFather` |
-| `TRANSLATOR_PROVIDER` | `google` | `google`, `groq`, `gemini`, `openrouter`, `openai`, `deepl`, `libretranslate` |
-| `TRANSLATOR_API_KEY` | `""` | Ключ API (обязателен для `groq`, `gemini`, `openrouter`, `openai`, `deepl`) |
-| `TRANSLATOR_API_URL` | *(по пресету)* | Кастомный базовый URL API переводчика |
-| `TRANSLATOR_MODEL` | *(по пресету)* | Имя модели LLM (переопределяет дефолт пресета) |
-| `TRANSLATOR_TIMEOUT` | `5.0` | Таймаут сетевого запроса к переводчику в секундах |
-| `TRANSLATOR_FALLBACK_PROVIDER` | `""` | Резервный провайдер или цепочка через запятую (например, `google`) |
-| `TRANSLATOR_GLOSSARY` | `""` | Список слов/имён через запятую, которые не нужно переводить |
-| `DEFAULT_SOURCE_LANG` | `auto` | Исходный язык по умолчанию для новых пользователей |
-| `DEFAULT_TARGET_LANG` | `en` | Язык назначения по умолчанию для новых пользователей |
-| `DEFAULT_SWAP_LANG` | `""` | Парный язык двусторонней авто-смены по умолчанию (например, `ru` или `pl`) |
-| `DEFAULT_STYLE` | `neutral` | Стиль по умолчанию (`neutral`, `casual`, `formal`) |
-| `DEFAULT_UI_LANG` | `ru` | Язык UI при отсутствии `language_code` у клиента (`en` или `ru`) |
-| `INLINE_EXTRA_LANGS` | `""` | Доп. языки карточек Inline по умолчанию (например, `pl,de`) |
-| `INLINE_STYLE_VARIANTS` | `true` | Показывать карточки всех 3 стилей в Inline Mode |
-| `INLINE_DEBOUNCE_MS` | `180` | Окно объединения нажатий в Inline Mode на промахе кэша (`0..2000` мс) |
-| `WEBHOOK_URL` | `""` | Публичный `https://` URL для режима Webhook (пусто — Long Polling) |
-| `WEBHOOK_SECRET_TOKEN` | `""` | Секрет для `X-Telegram-Bot-Api-Secret-Token` (если пуст — генерируется при старте) |
-| `WEBHOOK_HOST` | `127.0.0.1` | Локальный адрес прослушивания Webhook-сервера |
-| `WEBHOOK_PORT` | `8080` | Локальный порт Webhook-сервера (`GET /healthz` для healthcheck) |
-| `WEBHOOK_PATH` | `/webhook` | HTTP-путь обработчика апдейтов Telegram |
-| `DATABASE_PATH` | `data/mivta.db` | Путь к файлу SQLite с настройками пользователей |
-| `MAX_TEXT_LENGTH` | `500` | Максимальная длина входного текста (`1..4096`) |
-| `CACHE_TTL` | `300` | Время жизни кэша переводов в памяти в секундах (`0` — выкл.) |
-| `CACHE_MAX_SIZE` | `512` | Максимальное число записей в LRU-кэше |
-| `RATE_LIMIT_PER_MINUTE` | `30` | Допустимая средняя частота запросов к API на пользователя |
-| `RATE_LIMIT_BURST` | `15` | Допустимый пиковый всплеск запросов при наборе текста |
-| `MAX_CONCURRENT_TRANSLATIONS` | `20` | Лимит одновременных исходящих запросов к API переводчика |
-| `LOG_LEVEL` | `INFO` | Уровень логирования (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| **`mivta`** | Отправка **своих** сообщений на языке собеседника прямо из поля ввода: без `via @bot` в личке (Secretary Mode) и с карточками стилей/языков в любых группах (Inline Mode) | В группах и каналах Telegram всегда показывает плашку `via @bot` у inline-сообщений; входящие чужие сообщения не переводит |
+| **Встроенный перевод Telegram** | **Чтение входящих** сообщений и целых иноязычных чатов/каналов в одно касание | Не переводит ваши собственные исходящие реплики перед отправкой; автоперевод всего чата требует Telegram Premium |
+| **MTProto-юзерботы** | Редактирование своих сообщений без `via @bot` в том числе внутри групповых чатов | Требует передать стороннему процессу полную сессию личного аккаунта с риском заморозки со стороны антифрода Telegram |
+| **Обычные боты в ЛС** | Разовый перевод больших текстов или пересланных постов | Ломает ритм диалога постоянным переключением чатов и ручным копированием |
 
----
+## Свой сервер
 
-## Архитектура
-
-```text
-mivta/
-├── __main__.py        # Точка входа `python -m mivta`
-├── bot.py             # Инициализация Bot/Dispatcher, жизненный цикл, очистка кэша
-├── config.py          # Загрузка и валидация .env, LLM-пресетов, резерва и глоссария
-├── database.py        # Асинхронное хранилище настроек и подключений в SQLite (WAL)
-├── handlers/
-│   ├── pipeline.py    # Общий конвейер перевода (кэш, лимитер, singleflight, батчи стилей/языков)
-│   ├── inline.py      # Обработчик Telegram Inline Mode (мульти-карточки стилей и языков)
-│   ├── business.py    # Обработчик Secretary Mode (замена текста и подписей без via @bot)
-│   └── commands.py    # /settings, /lang, /langs, /source, /style и inline-клавиатуры
-├── translator/        # Независимый от Telegram слой провайдеров перевода (HTTPX)
-│   ├── base.py        # Абстракция Translator, модели запросов/ответов и иерархия ошибок
-│   ├── openai.py      # OpenAI/Groq/Gemini/OpenRouter провайдер (стили, батч JSON, глоссарий)
-│   ├── deepl.py       # DeepL v2 провайдер (formality + XML-разметка тегов)
-│   ├── libre.py       # LibreTranslate провайдер
-│   ├── google.py      # Google Translate JSON провайдер
-│   ├── fallback.py    # Цепочка отказоустойчивости FallbackTranslator
-│   └── factory.py     # Фабрика провайдеров, пресетов и общего httpx.AsyncClient
-└── utils/
-    ├── cache.py       # Ограниченный по памяти TTL + LRU кэш с хешированными ключами
-    ├── formatting.py  # Защита кода/ссылок/@username, глоссария и пересчёт UTF-16 entities
-    ├── languages.py   # Реестр ISO-кодов языков, алиасов и нормализации
-    ├── parser.py      # Санитизация ввода, разбор директив и сдвиг entities
-    └── ratelimit.py   # Per-user Token Bucket ограничитель частоты с фиксированным потолком памяти
-```
-
----
-
-## Развёртывание
-
-### Автоматическая установка на Ubuntu / Debian (`install.sh`)
-
-**Интерактивная установка одной командой**:
+Установка или обновление на Ubuntu / Debian одной командой (создаёт изолированный `.venv`, непривилегированного пользователя `mivta`, `systemd`-сервис и ежедневный таймер автообновления):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
 ```
 
-**Неинтерактивная установка** (например, Groq + резерв на Google):
+Инструкции по настройке токена и режимов в `@BotFather`: [docs/botfather.md](docs/botfather.md).
+
+<details>
+<summary>Неинтерактивная установка, Docker Compose и локальный запуск</summary>
+
+Неинтерактивное развёртывание (например, Groq + резерв на Google + пара `en ⇄ ru`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
-  | sudo BOT_TOKEN="123456:ABC..." \
-         TRANSLATOR_PROVIDER="groq" \
-         TRANSLATOR_API_KEY="gsk_..." \
-         TRANSLATOR_FALLBACK_PROVIDER="google" \
-         MIVTA_NONINTERACTIVE=1 bash
+curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash -s -- \
+  --non-interactive \
+  --token "123456:ABC..." \
+  --provider groq \
+  --api-key "gsk_..." \
+  --swap-lang ru
 ```
 
-**Обновление установленного бота** (сохраняет `/opt/mivta/.env` и `/opt/mivta/data/mivta.db`, а также включает ежедневный `systemd`-таймер автообновления и перезапуска `mivta-update.timer` в **06:00** по времени сервера):
+Docker Compose:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
-```
-
-Полезные команды таймера автообновления (`06:00`):
-
-```bash
-# Проверить расписание следующего запуска (и часовой пояс сервера):
-sudo systemctl list-timers mivta-update.timer
-timedatectl
-
-# Изменить время ежедневного обновления/перезапуска (или отключить таймер):
-curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh \
-  | sudo MIVTA_AUTO_UPDATE_TIME="06:00" bash
-# Отключить автообновление: sudo /opt/mivta/install.sh --from-local /opt/mivta --no-auto-update
-
-# Запустить проверку обновлений и перезапуск вручную прямо сейчас:
-sudo systemctl start mivta-update.service
-```
-
-**Удаление сервиса**:
-
-```bash
-# Удалить только systemd-юнит (сохранив .env и data/):
-sudo /opt/mivta/install.sh --uninstall
-
-# Полное удаление вместе с /opt/mivta и системным пользователем:
-sudo /opt/mivta/install.sh --uninstall --purge
-```
-
-### Docker Compose
-
-```bash
-cp .env.example .env
+git clone https://github.com/RUdolf1517/mivta.git && cd mivta
+cp .env.example .env   # укажите BOT_TOKEN
 docker compose up -d --build
 ```
 
----
-
-## Разработка и тесты
+Локальный запуск из исходников:
 
 ```bash
+python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -v
-.venv/bin/ruff check .
-shellcheck install.sh
+cp .env.example .env   # укажите BOT_TOKEN
+.venv/bin/python -m mivta
 ```
+
+</details>
+
+## Документация
+
+| Документ | Содержание |
+| :--- | :--- |
+| [botfather](docs/botfather.md) | Создание своего бота в `@BotFather` и подключение Автоматизации чатов |
+| [providers](docs/providers.md) | Провайдеры перевода, LLM-пресеты, глоссарий, резерв и авто-разворот `⇄` |
+| [config](docs/config.md) | Все переменные `.env`, значения по умолчанию, лимиты и настройки Webhook |
+| [deployment](docs/deployment.md) | Флаги `install.sh`, разграничение прав, таймер автообновления, Webhook за Caddy/Nginx и Docker |
+| [architecture](docs/architecture.md) | Модули проекта, поток обработки запроса и пересчёт UTF-16 сущностей |
+| [CONTRIBUTING](CONTRIBUTING.md) · [SECURITY](SECURITY.md) · [CHANGELOG](CHANGELOG.md) | Правила контрибуции, политика уязвимостей и история релизов |
+
+## Название
+
+Иврит **מבטא** (*mivta*): произношение, выражение, интонация — то, как мысль звучит на другом языке, сохраняя естественный регистр говорящего (`neutral`, `casual`, `formal`).
+
+Written by AI. Directed by [RUdolf1517](https://github.com/RUdolf1517) ·
+[rudolfzinovev@protonmail.com](mailto:rudolfzinovev@protonmail.com)
 
 ## Лицензия
 
-[MIT](LICENSE)
+[MIT](LICENSE).
