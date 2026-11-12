@@ -12,7 +12,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -64,6 +69,28 @@ BOT_COMMANDS_RU: list[BotCommand] = [
     BotCommand(command="privacy", description="Политика конфиденциальности"),
     BotCommand(command="reset", description="Удалить сохранённые настройки"),
     BotCommand(command="help", description="Как пользоваться Inline и Secretary Mode"),
+]
+
+GROUP_ADMIN_COMMANDS_EN: list[BotCommand] = [
+    BotCommand(command="settings", description="Group translation panel & ignore list"),
+    BotCommand(command="grouplang", description="Set group language or 'personal'"),
+    BotCommand(command="groupswap", description="Set group auto-swap (⇄) or 'off'"),
+    BotCommand(command="groupstyle", description="Set group tone or 'personal'"),
+    BotCommand(command="grouppause", description="Pause or resume '>' in this group"),
+    BotCommand(command="ignore", description="Ignore member (reply, @user, or ID)"),
+    BotCommand(command="unignore", description="Unignore member (reply, @user, or ID)"),
+    BotCommand(command="ignored", description="View & manage group ignore list"),
+]
+
+GROUP_ADMIN_COMMANDS_RU: list[BotCommand] = [
+    BotCommand(command="settings", description="Панель настроек группы и игнор-лист"),
+    BotCommand(command="grouplang", description="Язык группы или personal"),
+    BotCommand(command="groupswap", description="Авто-смена (⇄) в группе или off"),
+    BotCommand(command="groupstyle", description="Стиль в группе или personal"),
+    BotCommand(command="grouppause", description="Пауза / включение «>» в группе"),
+    BotCommand(command="ignore", description="В игнор-лист (реплай, @user или ID)"),
+    BotCommand(command="unignore", description="Снять игнор (реплай, @user или ID)"),
+    BotCommand(command="ignored", description="Список игнора с кнопками снятия"),
 ]
 
 
@@ -201,6 +228,22 @@ async def _register_localized_commands(bot: Bot) -> None:
         await bot.set_my_commands(BOT_COMMANDS_EN)
         for lc in ("ru", "be", "kk"):
             await bot.set_my_commands(BOT_COMMANDS_RU, language_code=lc)
+
+    priv_scope = BotCommandScopeAllPrivateChats()
+    grp_all_scope = BotCommandScopeAllGroupChats()
+    grp_adm_scope = BotCommandScopeAllChatAdministrators()
+    with contextlib.suppress(Exception):
+        await bot.set_my_commands(BOT_COMMANDS_EN, scope=priv_scope)
+        await bot.set_my_commands([], scope=grp_all_scope)
+        await bot.set_my_commands(GROUP_ADMIN_COMMANDS_EN, scope=grp_adm_scope)
+        for lc in ("ru", "be", "kk"):
+            await bot.set_my_commands(BOT_COMMANDS_RU, scope=priv_scope, language_code=lc)
+            await bot.set_my_commands([], scope=grp_all_scope, language_code=lc)
+            await bot.set_my_commands(
+                GROUP_ADMIN_COMMANDS_RU,
+                scope=grp_adm_scope,
+                language_code=lc,
+            )
 
 
 async def _run_webhook_server(
