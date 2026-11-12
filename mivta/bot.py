@@ -17,6 +17,8 @@ from aiogram.types import (
     BotCommandScopeAllChatAdministrators,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    Update,
 )
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -32,6 +34,7 @@ from mivta.translator import (
     create_translator,
 )
 from mivta.utils.cache import TranslationCache
+from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.ratelimit import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -142,6 +145,25 @@ def configure_logging(level: str, *, secrets_to_redact: Sequence[str] = ()) -> N
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
 
+def _extract_update_user_id(update: Update) -> int | None:
+    for event_attr in (
+        "inline_query",
+        "message",
+        "business_message",
+        "edited_business_message",
+        "callback_query",
+    ):
+        ev = getattr(update, event_attr, None)
+        if ev is not None:
+            user = getattr(ev, "from_user", None)
+            if user is not None and not user.is_bot:
+                return int(user.id)
+    bc = getattr(update, "business_connection", None)
+    if bc is not None and getattr(bc, "user", None) is not None and not bc.user.is_bot:
+        return int(bc.user.id)
+    return None
+
+
 def create_dispatcher(
     *,
     config: Config,
@@ -149,6 +171,7 @@ def create_dispatcher(
     translator: Translator,
     cache: TranslationCache | None = None,
     rate_limiter: RateLimiter | None = None,
+    metrics: RuntimeMetrics | None = None,
     bot_username: str = "BotUsername",
 ) -> Dispatcher:
     """Wire routers and runtime dependencies into an aiogram Dispatcher."""
@@ -171,15 +194,27 @@ def create_dispatcher(
             burst=config.rate_limit_burst,
         )
     )
+    resolved_metrics = metrics if metrics is not None else RuntimeMetrics()
     inflight: dict[bytes, InflightEntry] = {}
     inline_active: dict[int, tuple[int, asyncio.Task[Any]]] = {}
     inline_seq: list[int] = [0]
+
+    @dp.update.outer_middleware()
+    async def _metrics_middleware(
+        handler: Any,
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        if isinstance(event, Update):
+            resolved_metrics.record_activity(_extract_update_user_id(event))
+        return await handler(event, data)
 
     dp["config"] = config
     dp["db"] = db
     dp["translator"] = translator
     dp["cache"] = resolved_cache
     dp["rate_limiter"] = resolved_limiter
+    dp["metrics"] = resolved_metrics
     dp["concurrency_sem"] = asyncio.Semaphore(config.max_concurrent_translations)
     dp["inflight"] = inflight
     dp["inline_active"] = inline_active
@@ -223,7 +258,53 @@ async def _cache_janitor(cache: TranslationCache, interval_seconds: float) -> No
         cache.purge_expired()
 
 
-async def _register_localized_commands(bot: Bot) -> None:
+def build_bot_descriptions(bot_username: str) -> tuple[str, str, str, str]:
+    """Return `(short_en, short_ru, description_en, description_ru)` within Telegram limits."""
+    handle = f"@{bot_username.lstrip('@') or 'mivtabot'}"
+    short_en = (
+        f"Translate outgoing messages in-chat: {handle} anywhere, "
+        "or '> text' in DMs and groups."
+    )[:120]
+    short_ru = (
+        f"Перевод ваших реплик прямо в чате: {handle} везде "
+        "и «> текст» в личке и группах."
+    )[:120]
+    desc_en = (
+        "Translate outgoing messages right from the Telegram input bar — "
+        "zero forwarding, zero stored message text.\n\n"
+        f"• Any chat: type {handle} and your text\n"
+        f"• 1-on-1 DMs (no via {handle}): connect in Settings → Chat Automation "
+        "and write '> text'\n"
+        "• Groups: add as admin with 'Delete messages' and write '> text'\n\n"
+        "Tap Start to choose languages, auto-swap (⇄), and style."
+    )[:512]
+    desc_ru = (
+        "Переводчик исходящих сообщений прямо из поля ввода Telegram — "
+        "без пересылки текста и без хранения переписки.\n\n"
+        f"• В любом чате: наберите {handle} и ваш текст\n"
+        f"• В личке без via {handle}: подключите в «Настройки → Автоматизация чатов» "
+        "и пишите «> текст»\n"
+        "• В группе: добавьте админом с правом «Удаление сообщений» и пишите «> текст»\n\n"
+        "Нажмите «Старт», чтобы выбрать языки, авто-смену (⇄) и стиль."
+    )[:512]
+    return short_en, short_ru, desc_en, desc_ru
+
+
+async def _register_localized_profile(bot: Bot, bot_username: str) -> None:
+    short_en, short_ru, desc_en, desc_ru = build_bot_descriptions(bot_username)
+    with contextlib.suppress(Exception):
+        await bot.set_my_short_description(short_description=short_en)
+        await bot.set_my_description(description=desc_en)
+        for lc in ("ru", "be", "kk"):
+            await bot.set_my_short_description(short_description=short_ru, language_code=lc)
+            await bot.set_my_description(description=desc_ru, language_code=lc)
+
+
+async def _register_localized_commands(
+    bot: Bot,
+    *,
+    owner_ids: Sequence[int] = (),
+) -> None:
     with contextlib.suppress(Exception):
         await bot.set_my_commands(BOT_COMMANDS_EN)
         for lc in ("ru", "be", "kk"):
@@ -244,6 +325,26 @@ async def _register_localized_commands(bot: Bot) -> None:
                 scope=grp_adm_scope,
                 language_code=lc,
             )
+
+    if owner_ids:
+        owner_cmds_en = [
+            *BOT_COMMANDS_EN,
+            BotCommand(command="status", description="Server, API chain & user status"),
+        ]
+        owner_cmds_ru = [
+            *BOT_COMMANDS_RU,
+            BotCommand(command="status", description="Статус сервера, API и аудитории"),
+        ]
+        for oid in owner_ids:
+            owner_scope = BotCommandScopeChat(chat_id=oid)
+            with contextlib.suppress(Exception):
+                await bot.set_my_commands(owner_cmds_en, scope=owner_scope)
+                for lc in ("ru", "be", "kk"):
+                    await bot.set_my_commands(
+                        owner_cmds_ru,
+                        scope=owner_scope,
+                        language_code=lc,
+                    )
 
 
 async def _run_webhook_server(
@@ -339,7 +440,9 @@ async def run_bot(config: Config) -> None:
                 bot_username,
             )
 
-        await _register_localized_commands(bot)
+        await _register_localized_commands(bot, owner_ids=config.owner_ids)
+        if config.sync_bot_profile:
+            await _register_localized_profile(bot, bot_username)
 
         dp = create_dispatcher(
             config=config,

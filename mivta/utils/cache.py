@@ -47,10 +47,28 @@ class TranslationCache:
         self._ttl = max(0.0, ttl_seconds)
         self._clock = clock
         self._entries: OrderedDict[bytes, _CacheEntry] = OrderedDict()
+        self._hits: int = 0
+        self._misses: int = 0
 
     @property
     def enabled(self) -> bool:
         return self._max_size > 0 and self._ttl > 0.0
+
+    @property
+    def max_size(self) -> int:
+        return self._max_size
+
+    @property
+    def ttl_seconds(self) -> float:
+        return self._ttl
+
+    @property
+    def hits(self) -> int:
+        return self._hits
+
+    @property
+    def misses(self) -> int:
+        return self._misses
 
     def __len__(self) -> int:
         self.purge_expired()
@@ -59,16 +77,20 @@ class TranslationCache:
     def get(self, provider: str, request: TranslationRequest) -> TranslationResult | None:
         """Retrieve a valid cached translation or None if missing/expired."""
         if not self.enabled:
+            self._misses += 1
             return None
         now = self._clock()
         key = _make_key(provider, request)
         entry = self._entries.get(key)
         if entry is None:
+            self._misses += 1
             return None
         if entry.expires_at <= now:
             self._entries.pop(key, None)
+            self._misses += 1
             return None
         self._entries.move_to_end(key)
+        self._hits += 1
         return entry.result
 
     def set(

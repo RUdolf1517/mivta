@@ -47,6 +47,7 @@ ARG_WEBHOOK_SECRET="${WEBHOOK_SECRET_TOKEN:-}"
 ARG_WEBHOOK_HOST="${WEBHOOK_HOST:-}"
 ARG_WEBHOOK_PORT="${WEBHOOK_PORT:-}"
 ARG_WEBHOOK_PATH="${WEBHOOK_PATH:-}"
+ARG_OWNER_ID="${OWNER_ID:-}"
 
 say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'mivta-install: warning: %s\n' "$*" >&2; }
@@ -66,6 +67,7 @@ Options:
   --api-url <URL>          Custom TRANSLATOR_API_URL
   --model <MODEL>          TRANSLATOR_MODEL for LLM provider
   --swap-lang <CODE>       Bidirectional auto-swap language (e.g. ru, pl)
+  --owner-id <ID>          Numeric Telegram user ID(s) allowed to run /status in DM
   --webhook-url <HTTPS>    Enable Telegram Webhook mode (https://...)
   --webhook-secret <SEC>   WEBHOOK_SECRET_TOKEN for X-Telegram-Bot-Api-Secret-Token
   --webhook-port <PORT>    Local port for Webhook HTTP server (default: 8080)
@@ -121,6 +123,11 @@ while [ $# -gt 0 ]; do
     --swap-lang)
       [ $# -ge 2 ] || err "--swap-lang requires a value"
       ARG_SWAP_LANG="$2"
+      shift 2
+      ;;
+    --owner-id)
+      [ $# -ge 2 ] || err "--owner-id requires a value"
+      ARG_OWNER_ID="$2"
       shift 2
       ;;
     --webhook-url)
@@ -599,6 +606,7 @@ configure_env_file() {
   [ -n "$ARG_WEBHOOK_HOST" ]          && set_env_var "$env_file" "WEBHOOK_HOST" "$ARG_WEBHOOK_HOST"
   [ -n "$ARG_WEBHOOK_PORT" ]          && set_env_var "$env_file" "WEBHOOK_PORT" "$ARG_WEBHOOK_PORT"
   [ -n "$ARG_WEBHOOK_PATH" ]          && set_env_var "$env_file" "WEBHOOK_PATH" "$ARG_WEBHOOK_PATH"
+  [ -n "$ARG_OWNER_ID" ]              && set_env_var "$env_file" "OWNER_ID" "$ARG_OWNER_ID"
 
   local current_tok
   current_tok="$(get_env_var "$env_file" "BOT_TOKEN")"

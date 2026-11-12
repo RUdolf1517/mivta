@@ -64,6 +64,18 @@ class ProviderSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderStatus:
+    """Live health and counter snapshot for one translation provider."""
+
+    name: str
+    is_active: bool
+    cooldown_remaining: float = 0.0
+    success_count: int = 0
+    failure_count: int = 0
+    last_error_type: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationRequest:
     """Input contract for any translation provider."""
 
@@ -157,3 +169,11 @@ class Translator(ABC):
     async def aclose(self) -> None:
         """Release any resources owned exclusively by the translator."""
         return None
+
+    def reset_cooldowns(self) -> None:
+        """Reset any failure cooldowns (no-op for single-provider translators)."""
+        return None
+
+    def get_provider_statuses(self) -> tuple[ProviderStatus, ...]:
+        """Return health snapshots for this translator (or each provider in a chain)."""
+        return (ProviderStatus(name=self.name, is_active=True),)

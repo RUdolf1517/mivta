@@ -100,6 +100,27 @@ def _parse_bool(name: str, raw: str) -> bool:
     raise ConfigError(f"{name} must be a boolean (true/false), got {raw!r}")
 
 
+def _parse_owner_ids(raw: str) -> tuple[int, ...]:
+    if not raw.strip() or raw.strip().lower() in _DISABLE_TOKENS:
+        return ()
+    ids: list[int] = []
+    for piece in raw.replace(";", ",").split(","):
+        token = piece.strip()
+        if not token:
+            continue
+        try:
+            uid = int(token)
+        except ValueError as exc:
+            raise ConfigError(
+                f"OWNER_ID must be a positive integer Telegram ID, got {token!r}"
+            ) from exc
+        if uid <= 0:
+            raise ConfigError(f"OWNER_ID must be > 0, got {uid}")
+        if uid not in ids:
+            ids.append(uid)
+    return tuple(ids)
+
+
 def _parse_glossary(raw: str) -> tuple[str, ...]:
     if not raw.strip():
         return ()
@@ -387,6 +408,8 @@ class Config:
     rate_limit_per_minute: float = 30.0
     rate_limit_burst: int = 15
     max_concurrent_translations: int = 20
+    owner_ids: tuple[int, ...] = ()
+    sync_bot_profile: bool = True
     log_level: str = "INFO"
 
     @classmethod
@@ -547,6 +570,11 @@ class Config:
             merged.get("MAX_CONCURRENT_TRANSLATIONS", "20"),
             minimum=1,
         )
+        owner_ids = _parse_owner_ids(merged.get("OWNER_ID", ""))
+        sync_bot_profile = _parse_bool(
+            "SYNC_BOT_PROFILE",
+            merged.get("SYNC_BOT_PROFILE", "true"),
+        )
 
         log_level = merged.get("LOG_LEVEL", "INFO").strip().upper()
         if log_level not in VALID_LOG_LEVELS:
@@ -596,5 +624,7 @@ class Config:
             rate_limit_per_minute=rate_limit_per_minute,
             rate_limit_burst=rate_limit_burst,
             max_concurrent_translations=max_concurrent,
+            owner_ids=owner_ids,
+            sync_bot_profile=sync_bot_profile,
             log_level=log_level,
         )
