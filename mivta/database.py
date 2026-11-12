@@ -147,6 +147,18 @@ class GroupSettings:
     show_delete_btn: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class DatabaseStats:
+    """Aggregate row counts for the owner `/status` dashboard (zero PII)."""
+
+    saved_users: int = 0
+    business_active: int = 0
+    business_total: int = 0
+    groups_active: int = 0
+    groups_total: int = 0
+    ignored_users_total: int = 0
+
+
 class Database:
     """Async SQLite repository storing strictly user settings and connection metadata."""
 
@@ -690,3 +702,28 @@ class Database:
             )
             await conn.commit()
             return int(cur.rowcount or 0)
+
+    async def get_stats(self) -> DatabaseStats:
+        """Return aggregate row counts across settings, Secretary Mode, and group tables."""
+        conn = self._require_conn()
+        query = """
+        SELECT
+            (SELECT COUNT(*) FROM user_settings) AS saved_users,
+            (SELECT COUNT(*) FROM business_connections WHERE is_enabled = 1) AS biz_active,
+            (SELECT COUNT(*) FROM business_connections) AS biz_total,
+            (SELECT COUNT(*) FROM group_settings WHERE is_enabled = 1) AS grp_active,
+            (SELECT COUNT(*) FROM group_settings) AS grp_total,
+            (SELECT COUNT(*) FROM group_ignored_users) AS ignored_total
+        """
+        async with conn.execute(query) as cursor:
+            row = await cursor.fetchone()
+        if row is None:  # pragma: no cover
+            return DatabaseStats()
+        return DatabaseStats(
+            saved_users=int(row["saved_users"]),
+            business_active=int(row["biz_active"]),
+            business_total=int(row["biz_total"]),
+            groups_active=int(row["grp_active"]),
+            groups_total=int(row["grp_total"]),
+            ignored_users_total=int(row["ignored_total"]),
+        )

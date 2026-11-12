@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 
 from mivta.translator.base import (
     InvalidTranslationRequestError,
+    ProviderStatus,
     TextTooLongError,
     TranslationRequest,
     TranslationResult,
@@ -71,6 +72,9 @@ class FallbackTranslator(Translator):
         self._clock = clock
         # Maps provider index -> monotonic timestamp until which it is cooling down
         self._cooldown_until: dict[int, float] = {}
+        self._success_counts: list[int] = [0] * len(self._providers)
+        self._failure_counts: list[int] = [0] * len(self._providers)
+        self._last_error_types: list[str] = [""] * len(self._providers)
 
     @property
     def providers(self) -> tuple[Translator, ...]:
@@ -98,14 +102,37 @@ class FallbackTranslator(Translator):
         return 0.0
 
     def _record_failure(self, idx: int, exc: TranslatorError) -> None:
+        self._failure_counts[idx] += 1
+        self._last_error_types[idx] = type(exc).__name__
         duration = self._cooldown_duration_for(exc)
         if duration > 0.0:
             self._cooldown_until[idx] = self._clock() + duration
 
     def _record_success(self, idx: int) -> None:
+        self._success_counts[idx] += 1
         if idx in self._cooldown_until:
             del self._cooldown_until[idx]
             logger.info("Translator %s recovered and is healthy again", self._providers[idx].name)
+
+    def get_provider_statuses(self) -> tuple[ProviderStatus, ...]:
+        """Return ordered health, cooldown, and counter snapshots for all providers."""
+        now = self._clock()
+        candidates = self._ordered_candidates()
+        active_idx = candidates[0][0] if candidates else 0
+        statuses: list[ProviderStatus] = []
+        for idx, prov in enumerate(self._providers):
+            rem = max(0.0, self._cooldown_until.get(idx, 0.0) - now)
+            statuses.append(
+                ProviderStatus(
+                    name=prov.name,
+                    is_active=(idx == active_idx and rem == 0.0),
+                    cooldown_remaining=rem,
+                    success_count=self._success_counts[idx],
+                    failure_count=self._failure_counts[idx],
+                    last_error_type=self._last_error_types[idx],
+                )
+            )
+        return tuple(statuses)
 
     def _ordered_candidates(self) -> list[tuple[int, Translator]]:
         """Return ready providers first (by priority), then cooling-down ones last."""

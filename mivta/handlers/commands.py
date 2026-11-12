@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+from html import escape
+from typing import Any
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -15,9 +18,11 @@ from aiogram.types import (
     User,
 )
 
+from mivta import __version__
 from mivta.config import MAX_INLINE_EXTRA_LANGS, Config
-from mivta.database import Database, UserSettings
-from mivta.translator.base import TranslationStyle, parse_style
+from mivta.database import Database, DatabaseStats, UserSettings
+from mivta.translator.base import ProviderStatus, TranslationStyle, Translator, parse_style
+from mivta.utils.cache import TranslationCache
 from mivta.utils.i18n import (
     parse_ui_lang,
     resolve_ui_lang,
@@ -32,6 +37,7 @@ from mivta.utils.languages import (
     language_name,
     resolve_language,
 )
+from mivta.utils.metrics import RuntimeMetrics
 
 _CLEAR_TOKENS = frozenset({"off", "clear", "none", "reset", "выкл", "сброс", "-"})
 
@@ -1218,11 +1224,306 @@ async def reject_direct_messages(
     )
 
 
+def _format_uptime(seconds: float, lang: str) -> str:
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, secs = divmod(rem, 60)
+    if lang == "en":
+        parts: list[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours or days:
+            parts.append(f"{hours}h")
+        if minutes or hours or days:
+            parts.append(f"{minutes}m")
+        parts.append(f"{secs}s")
+        return " ".join(parts)
+    parts_ru: list[str] = []
+    if days:
+        parts_ru.append(f"{days}д")
+    if hours or days:
+        parts_ru.append(f"{hours}ч")
+    if minutes or hours or days:
+        parts_ru.append(f"{minutes}м")
+    parts_ru.append(f"{secs}с")
+    return " ".join(parts_ru)
+
+
+def _select_active_provider_index(statuses: tuple[ProviderStatus, ...]) -> int:
+    for idx, st in enumerate(statuses):
+        if st.cooldown_remaining <= 0.0:
+            return idx
+    if not statuses:
+        return -1
+    return min(range(len(statuses)), key=lambda idx: statuses[idx].cooldown_remaining)
+
+
+def _build_owner_status_keyboard(
+    lang: str,
+    *,
+    has_cooldowns: bool,
+    cache_enabled: bool,
+) -> InlineKeyboardMarkup:
+    refresh_lbl = "🔄 Refresh" if lang == "en" else "🔄 Обновить"
+    reset_cd_lbl = "⚡️ Reset cooldowns" if lang == "en" else "⚡️ Сбросить cooldown"
+    clear_cache_lbl = "🧹 Clear cache" if lang == "en" else "🧹 Очистить кэш"
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=refresh_lbl, callback_data="ost:refresh")],
+    ]
+    action_row: list[InlineKeyboardButton] = []
+    if has_cooldowns:
+        action_row.append(InlineKeyboardButton(text=reset_cd_lbl, callback_data="ost:reset_cd"))
+    if cache_enabled:
+        action_row.append(
+            InlineKeyboardButton(text=clear_cache_lbl, callback_data="ost:clear_cache")
+        )
+    if action_row:
+        rows.append(action_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _render_owner_status_html(
+    *,
+    lang: str,
+    bot_username: str,
+    config: Config,
+    statuses: tuple[ProviderStatus, ...],
+    db_stats: DatabaseStats,
+    cache: TranslationCache | None,
+    metrics: RuntimeMetrics | None,
+    inflight_count: int,
+) -> str:
+    handle = escape(f"@{bot_username.lstrip('@') or 'mivtabot'}")
+    mode = "webhook" if config.webhook_url else "polling"
+    uptime_str = _format_uptime(metrics.uptime_seconds if metrics is not None else 0.0, lang)
+    session_users = metrics.session_unique_users if metrics is not None else 0
+    total_updates = metrics.total_updates if metrics is not None else 0
+
+    active_idx = _select_active_provider_index(statuses)
+    active_name = escape(statuses[active_idx].name) if active_idx >= 0 else "—"
+    show_counts = len(statuses) > 1 or any(
+        (st.success_count > 0 or st.failure_count > 0) for st in statuses
+    )
+
+    provider_lines: list[str] = []
+    for idx, st in enumerate(statuses):
+        p_name = escape(st.name)
+        if st.cooldown_remaining > 0.0:
+            cd_secs = max(1, int(round(st.cooldown_remaining)))
+            err_suffix = f", {escape(st.last_error_type)}" if st.last_error_type else ""
+            state_txt = (
+                f"⏳ cooldown {cd_secs}s{err_suffix}"
+                if lang == "en"
+                else f"⏳ cooldown {cd_secs}с{err_suffix}"
+            )
+        elif idx == active_idx:
+            state_txt = "🟢 active" if lang == "en" else "🟢 активен"
+        else:
+            state_txt = "⚪️ standby" if lang == "en" else "⚪️ в резерве"
+
+        counts_txt = (
+            f" · ok: {st.success_count} / err: {st.failure_count}" if show_counts else ""
+        )
+        provider_lines.append(f"  {idx + 1}. <code>{p_name}</code> — {state_txt}{counts_txt}")
+
+    if cache is not None and cache.enabled:
+        fill = len(cache)
+        cap = cache.max_size
+        pct = int(round((fill / cap) * 100)) if cap > 0 else 0
+        hits = cache.hits
+        misses = cache.misses
+        total_lookups = hits + misses
+        hit_rate = int(round((hits / total_lookups) * 100)) if total_lookups > 0 else 0
+        if lang == "en":
+            cache_line = (
+                f"• Fill: <b>{fill} / {cap}</b> ({pct}%) · TTL {int(cache.ttl_seconds)}s\n"
+                f"• Hits: <b>{hits}</b> hit / <b>{misses}</b> miss ({hit_rate}%)"
+            )
+        else:
+            cache_line = (
+                f"• Заполнено: <b>{fill} / {cap}</b> ({pct}%) · TTL {int(cache.ttl_seconds)}с\n"
+                f"• Попадания: <b>{hits}</b> hit / <b>{misses}</b> miss ({hit_rate}%)"
+            )
+    else:
+        cache_line = "• Disabled" if lang == "en" else "• Отключён"
+
+    providers_block = "\n".join(provider_lines) or "  —"
+    if lang == "en":
+        return (
+            f"📊 <b>Status {handle}</b> · <code>v{escape(__version__)}</code>\n"
+            f"Mode: <code>{mode}</code> · Uptime: <b>{uptime_str}</b>\n\n"
+            f"🔌 <b>Translation chain</b> (now serving: <code>{active_name}</code>)\n"
+            f"{providers_block}\n\n"
+            "👥 <b>Users &amp; chats</b>\n"
+            f"• Active users (session): <b>{session_users}</b>\n"
+            f"• Saved user profiles (DB): <b>{db_stats.saved_users}</b>\n"
+            f"• Secretary / Business DMs: <b>{db_stats.business_active}</b> active "
+            f"({db_stats.business_total} total)\n"
+            f"• Groups ('&gt;' mode): <b>{db_stats.groups_active}</b> active "
+            f"({db_stats.groups_total} total, "
+            f"{db_stats.ignored_users_total} ignored)\n"
+            f"• Updates processed (session): <b>{total_updates}</b>\n\n"
+            "🧠 <b>RAM cache &amp; concurrency</b>\n"
+            f"{cache_line}\n"
+            f"• In-flight translations: <b>{inflight_count} / "
+            f"{config.max_concurrent_translations}</b>"
+        )
+
+    return (
+        f"📊 <b>Статус {handle}</b> · <code>v{escape(__version__)}</code>\n"
+        f"Режим: <code>{mode}</code> · Аптайм: <b>{uptime_str}</b>\n\n"
+        f"🔌 <b>Цепочка перевода</b> (активен сейчас: <code>{active_name}</code>)\n"
+        f"{providers_block}\n\n"
+        "👥 <b>Аудитория и чаты</b>\n"
+        f"• Уникальных юзеров за сессию: <b>{session_users}</b>\n"
+        f"• Профилей в БД: <b>{db_stats.saved_users}</b>\n"
+        f"• Личка (Secretary / Business): <b>{db_stats.business_active}</b> активн. "
+        f"(всего {db_stats.business_total})\n"
+        f"• Группы (режим «&gt;»): <b>{db_stats.groups_active}</b> активн. "
+        f"(всего {db_stats.groups_total}, игнор: {db_stats.ignored_users_total})\n"
+        f"• Апдейтов за сессию: <b>{total_updates}</b>\n\n"
+        "🧠 <b>RAM-кэш и нагрузка</b>\n"
+        f"{cache_line}\n"
+        f"• Переводов в полёте: <b>{inflight_count} / "
+        f"{config.max_concurrent_translations}</b>"
+    )
+
+
+async def cmd_status(
+    message: Message,
+    db: Database,
+    config: Config,
+    translator: Translator,
+    cache: TranslationCache | None = None,
+    metrics: RuntimeMetrics | None = None,
+    inflight: dict[bytes, Any] | None = None,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Owner-only `/status` dashboard in private chat."""
+    if message.from_user is None:
+        return
+    uid = message.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(message.from_user, settings, config)
+
+    if not config.owner_ids:
+        await message.answer(
+            (
+                "🔒 <b>/status is not configured yet.</b>\n\n"
+                f"Your numeric Telegram ID: <code>{uid}</code>\n"
+                f"Add <code>OWNER_ID={uid}</code> to <code>.env</code> "
+                "(or <code>/etc/mivta/mivta.env</code>) and restart the service."
+                if lang == "en"
+                else "🔒 <b>Команда /status ещё не настроена.</b>\n\n"
+                f"Ваш числовой Telegram ID: <code>{uid}</code>\n"
+                f"Добавьте <code>OWNER_ID={uid}</code> в <code>.env</code> "
+                "(или <code>/etc/mivta/mivta.env</code>) и перезапустите сервис."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if uid not in config.owner_ids:
+        await message.answer(
+            "Access denied: /status is available only to the bot owner."
+            if lang == "en"
+            else "Доступ запрещён: команда /status доступна только владельцу бота."
+        )
+        return
+
+    statuses = translator.get_provider_statuses()
+    db_stats = await db.get_stats()
+    has_cd = any(st.cooldown_remaining > 0.0 for st in statuses)
+    text = _render_owner_status_html(
+        lang=lang,
+        bot_username=bot_username,
+        config=config,
+        statuses=statuses,
+        db_stats=db_stats,
+        cache=cache,
+        metrics=metrics,
+        inflight_count=len(inflight) if inflight is not None else 0,
+    )
+    kb = _build_owner_status_keyboard(
+        lang,
+        has_cooldowns=has_cd,
+        cache_enabled=bool(cache is not None and cache.enabled),
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def handle_owner_status_callback(
+    callback: CallbackQuery,
+    db: Database,
+    config: Config,
+    translator: Translator,
+    cache: TranslationCache | None = None,
+    metrics: RuntimeMetrics | None = None,
+    inflight: dict[bytes, Any] | None = None,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Handle owner `/status` inline actions (`ost:refresh`, `ost:reset_cd`, `ost:clear_cache`)."""
+    uid = callback.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(callback.from_user, settings, config)
+
+    if not config.owner_ids or uid not in config.owner_ids:
+        await callback.answer(
+            "Owner only." if lang == "en" else "Доступно только владельцу бота.",
+            show_alert=True,
+        )
+        return
+
+    action = (callback.data or "").partition(":")[2]
+    toast = "Updated" if lang == "en" else "Обновлено"
+    if action == "reset_cd":
+        translator.reset_cooldowns()
+        toast = "Cooldowns reset" if lang == "en" else "Cooldown сброшен"
+    elif action == "clear_cache":
+        if cache is not None:
+            cache.clear()
+        toast = "RAM cache cleared" if lang == "en" else "RAM-кэш очищен"
+
+    if isinstance(callback.message, Message):
+        statuses = translator.get_provider_statuses()
+        db_stats = await db.get_stats()
+        has_cd = any(st.cooldown_remaining > 0.0 for st in statuses)
+        text = _render_owner_status_html(
+            lang=lang,
+            bot_username=bot_username,
+            config=config,
+            statuses=statuses,
+            db_stats=db_stats,
+            cache=cache,
+            metrics=metrics,
+            inflight_count=len(inflight) if inflight is not None else 0,
+        )
+        kb = _build_owner_status_keyboard(
+            lang,
+            has_cooldowns=has_cd,
+            cache_enabled=bool(cache is not None and cache.enabled),
+        )
+        try:
+            await callback.message.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    await callback.answer(toast)
+
+
 def build_commands_router() -> Router:
     """Create a fresh Router bound to command and settings callback handlers."""
     router = Router(name="commands")
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_settings, Command("help", "settings"))
+    router.message.register(cmd_status, Command("status"), F.chat.type == "private")
     router.message.register(cmd_lang, Command("lang"))
     router.message.register(cmd_swap, Command("swap"))
     router.message.register(cmd_langs, Command("langs"))
@@ -1232,5 +1533,6 @@ def build_commands_router() -> Router:
     router.message.register(cmd_privacy, Command("privacy"))
     router.message.register(cmd_reset, Command("reset"))
     router.callback_query.register(handle_settings_callback, F.data.startswith("cfg:"))
+    router.callback_query.register(handle_owner_status_callback, F.data.startswith("ost:"))
     router.message.register(reject_direct_messages, F.chat.type == "private")
     return router
