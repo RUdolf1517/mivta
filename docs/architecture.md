@@ -9,16 +9,18 @@ mivta/
 ├── handlers/
 │   ├── pipeline.py      # Кэш, лимитер, waiter-counted singleflight и батчи стилей/языков
 │   ├── inline.py        # Inline Mode: коалесинг нажатий, отмена устаревших задач, мульти-карточки
-│   ├── business.py      # Secretary Mode: замена текста и подписей на месте без via @bot
-│   └── commands.py      # Команды и интерактивные inline-меню настроек (RU / EN)
+│   ├── business.py      # Secretary Mode (1-на-1): замена текста и подписей на месте без via @bot
+│   ├── group.py         # Групповой режим `>`: переотправка с автором, админ-панель и игнор-лист
+│   └── commands.py      # Личные команды и интерактивные inline-меню настроек (RU / EN)
 ├── translator/          # Изолированный от Telegram и SQLite пакет переводчиков (HTTPX)
 │   ├── base.py          # Протокол Translator, модели запросов/ответов и иерархия ошибок
 │   ├── _http.py         # Потоковое чтение ответа с лимитом 1 MiB и маппинг HTTP-кодов
-│   ├── openai.py        # OpenAI/Groq/Gemini/OpenRouter: одноразовый <source_text_nonce>, JSON-батчи
+│   ├── openai.py        # OpenAI/Groq/Gemini/Mistral/OpenRouter: <source_text_nonce>, JSON-батчи
 │   ├── deepl.py         # DeepL v2: нативный formality + сохранение XML-тегов <sN>
 │   ├── google.py        # Бесключевой Google Translate с авто-переключением узлов при 429
+│   ├── mymemory.py      # Бесключевой MyMemory REST API (до 50k симв./сут с MYMEMORY_EMAIL)
 │   ├── libre.py         # LibreTranslate API
-│   ├── fallback.py      # Цепочка отказоустойчивости FallbackTranslator
+│   ├── fallback.py      # Цепочка отказоустойчивости с карантином (circuit breaker)
 │   └── factory.py       # Сборка провайдеров, пресетов и общего пула httpx.AsyncClient
 └── utils/
     ├── cache.py         # In-memory LRU + TTL кэш с 16-байтными BLAKE2b ключами

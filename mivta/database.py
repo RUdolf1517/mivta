@@ -15,6 +15,8 @@ from mivta.translator.base import TranslationStyle, parse_style
 from mivta.utils.i18n import SUPPORTED_UI_LANGS, parse_ui_lang
 from mivta.utils.languages import resolve_language
 
+MAX_GROUP_IGNORED_USERS = 500
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS user_settings (
     user_id INTEGER PRIMARY KEY,
@@ -35,6 +37,26 @@ CREATE TABLE IF NOT EXISTS business_connections (
     can_reply INTEGER NOT NULL DEFAULT 0,
     is_enabled INTEGER NOT NULL DEFAULT 1,
     updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_settings (
+    chat_id INTEGER PRIMARY KEY,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    source_lang TEXT NOT NULL DEFAULT 'auto',
+    target_lang TEXT DEFAULT NULL,
+    swap_lang TEXT DEFAULT NULL,
+    style TEXT DEFAULT NULL
+        CHECK (style IS NULL OR style IN ('neutral', 'casual', 'formal')),
+    ui_lang TEXT DEFAULT NULL,
+    show_delete_btn INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_ignored_users (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
 );
 """
 
@@ -109,6 +131,20 @@ class BusinessConnectionRecord:
     user_chat_id: int
     can_reply: bool
     is_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GroupSettings:
+    """Group-level translation preferences managed exclusively by group admins."""
+
+    chat_id: int
+    is_enabled: bool = True
+    source_lang: str = "auto"
+    target_lang: str = ""
+    swap_lang: str = ""
+    style: TranslationStyle | None = None
+    ui_lang: str = ""
+    show_delete_btn: bool = False
 
 
 class Database:
@@ -427,3 +463,230 @@ class Database:
             can_reply=bool(row["can_reply"]),
             is_enabled=bool(row["is_enabled"]),
         )
+
+    async def get_group_settings(self, chat_id: int) -> GroupSettings:
+        """Fetch group translation settings for chat_id (defaults to enabled + personal)."""
+        conn = self._require_conn()
+        async with conn.execute(
+            """
+            SELECT is_enabled, source_lang, target_lang, swap_lang, style, ui_lang, show_delete_btn
+            FROM group_settings
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row is None:
+            return GroupSettings(chat_id=chat_id)
+
+        src = resolve_language(str(row["source_lang"]), allow_auto=True) or "auto"
+        raw_tgt = row["target_lang"]
+        tgt = (
+            resolve_language(str(raw_tgt), allow_auto=False) or ""
+            if raw_tgt is not None and str(raw_tgt).strip()
+            else ""
+        )
+        raw_swap = row["swap_lang"]
+        swap = (
+            resolve_language(str(raw_swap), allow_auto=False) or ""
+            if raw_swap is not None and str(raw_swap).strip()
+            else ""
+        )
+        raw_style = row["style"]
+        style = (
+            parse_style(str(raw_style))
+            if raw_style is not None and str(raw_style).strip()
+            else None
+        )
+        raw_ui = row["ui_lang"]
+        ui_lang = str(raw_ui).strip().lower() if raw_ui is not None else ""
+        if ui_lang not in SUPPORTED_UI_LANGS:
+            ui_lang = ""
+
+        return GroupSettings(
+            chat_id=chat_id,
+            is_enabled=bool(row["is_enabled"]),
+            source_lang=src,
+            target_lang=tgt,
+            swap_lang=swap,
+            style=style,
+            ui_lang=ui_lang,
+            show_delete_btn=bool(row["show_delete_btn"]),
+        )
+
+    async def update_group_settings(
+        self,
+        chat_id: int,
+        *,
+        is_enabled: bool | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,
+        swap_lang: str | None = None,
+        style: TranslationStyle | None = None,
+        clear_style: bool = False,
+        ui_lang: str | None = None,
+        show_delete_btn: bool | None = None,
+    ) -> GroupSettings:
+        """Atomically upsert group-level settings and return the updated GroupSettings."""
+        conn = self._require_conn()
+        async with self._write_lock:
+            current = await self.get_group_settings(chat_id)
+            next_enabled = current.is_enabled if is_enabled is None else bool(is_enabled)
+            next_source = current.source_lang
+            next_target = current.target_lang
+            next_swap = current.swap_lang
+            next_style = None if clear_style else current.style
+            next_ui = current.ui_lang
+            next_del_btn = (
+                current.show_delete_btn if show_delete_btn is None else bool(show_delete_btn)
+            )
+
+            if source_lang is not None:
+                resolved_src = resolve_language(source_lang, allow_auto=True)
+                if resolved_src is None:
+                    raise ValueError(f"Unsupported group source language: {source_lang!r}")
+                next_source = resolved_src
+
+            if target_lang is not None:
+                if not target_lang.strip():
+                    next_target = ""
+                else:
+                    resolved_tgt = resolve_language(target_lang, allow_auto=False)
+                    if resolved_tgt is None:
+                        raise ValueError(f"Unsupported group target language: {target_lang!r}")
+                    next_target = resolved_tgt
+
+            if swap_lang is not None:
+                next_swap = _normalize_swap_lang_input(swap_lang)
+
+            if style is not None:
+                next_style = style
+
+            if ui_lang is not None:
+                next_ui = _normalize_ui_lang_input(ui_lang)
+
+            now_ts = int(time.time())
+            await conn.execute(
+                """
+                INSERT INTO group_settings (
+                    chat_id, is_enabled, source_lang, target_lang, swap_lang,
+                    style, ui_lang, show_delete_btn, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    is_enabled = excluded.is_enabled,
+                    source_lang = excluded.source_lang,
+                    target_lang = excluded.target_lang,
+                    swap_lang = excluded.swap_lang,
+                    style = excluded.style,
+                    ui_lang = excluded.ui_lang,
+                    show_delete_btn = excluded.show_delete_btn,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    int(next_enabled),
+                    next_source,
+                    next_target or None,
+                    next_swap or None,
+                    next_style.value if next_style is not None else None,
+                    next_ui or None,
+                    int(next_del_btn),
+                    now_ts,
+                ),
+            )
+            await conn.commit()
+
+            return GroupSettings(
+                chat_id=chat_id,
+                is_enabled=next_enabled,
+                source_lang=next_source,
+                target_lang=next_target,
+                swap_lang=next_swap,
+                style=next_style,
+                ui_lang=next_ui,
+                show_delete_btn=next_del_btn,
+            )
+
+    async def reset_group_settings(self, chat_id: int) -> GroupSettings:
+        """Reset group translation preferences to defaults (keeps moderation ignore list)."""
+        conn = self._require_conn()
+        async with self._write_lock:
+            await conn.execute("DELETE FROM group_settings WHERE chat_id = ?", (chat_id,))
+            await conn.commit()
+        return GroupSettings(chat_id=chat_id)
+
+    async def is_user_ignored_in_group(self, chat_id: int, user_id: int) -> bool:
+        """Return True if user_id is in the group's translation ignore list."""
+        conn = self._require_conn()
+        async with conn.execute(
+            "SELECT 1 FROM group_ignored_users WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        ) as cursor:
+            return (await cursor.fetchone()) is not None
+
+    async def add_group_ignored_user(self, chat_id: int, user_id: int) -> bool:
+        """Add user_id to the group's ignore list. Returns True if newly added."""
+        conn = self._require_conn()
+        async with self._write_lock:
+            async with conn.execute(
+                "SELECT 1 FROM group_ignored_users WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            ) as cur_exists:
+                if await cur_exists.fetchone() is not None:
+                    return False
+
+            async with conn.execute(
+                "SELECT COUNT(*) AS cnt FROM group_ignored_users WHERE chat_id = ?",
+                (chat_id,),
+            ) as cur_cnt:
+                cnt_row = await cur_cnt.fetchone()
+                count = int(cnt_row["cnt"]) if cnt_row is not None else 0
+            if count >= MAX_GROUP_IGNORED_USERS:
+                raise ValueError(
+                    f"Group ignore list is full ({MAX_GROUP_IGNORED_USERS} users max)"
+                )
+
+            await conn.execute(
+                "INSERT INTO group_ignored_users (chat_id, user_id, created_at) VALUES (?, ?, ?)",
+                (chat_id, user_id, int(time.time())),
+            )
+            await conn.commit()
+            return True
+
+    async def remove_group_ignored_user(self, chat_id: int, user_id: int) -> bool:
+        """Remove user_id from the group's ignore list. Returns True if removed."""
+        conn = self._require_conn()
+        async with self._write_lock:
+            cur = await conn.execute(
+                "DELETE FROM group_ignored_users WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+            await conn.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def list_group_ignored_users(self, chat_id: int) -> tuple[int, ...]:
+        """Return ignored user IDs for chat_id, newest first."""
+        conn = self._require_conn()
+        async with conn.execute(
+            """
+            SELECT user_id FROM group_ignored_users
+            WHERE chat_id = ?
+            ORDER BY created_at DESC, user_id ASC
+            """,
+            (chat_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(int(r["user_id"]) for r in rows)
+
+    async def clear_group_ignored_users(self, chat_id: int) -> int:
+        """Clear all ignored users in chat_id and return the number of removed entries."""
+        conn = self._require_conn()
+        async with self._write_lock:
+            cur = await conn.execute(
+                "DELETE FROM group_ignored_users WHERE chat_id = ?",
+                (chat_id,),
+            )
+            await conn.commit()
+            return int(cur.rowcount or 0)
