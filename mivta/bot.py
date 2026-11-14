@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllChatAdministrators,
@@ -382,6 +383,14 @@ async def _run_webhook_server(
         secret_token=effective_secret,
     )
     runner = web.AppRunner(app, access_log=None)
+    stop_event = asyncio.Event() if stop_event is None else stop_event
+    loop = asyncio.get_running_loop()
+    # Install the handlers before binding anything: a SIGTERM arriving while the
+    # site is starting (or while set_webhook is waiting on the network) must not
+    # leave the process unstoppable until systemd escalates to SIGKILL.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
     await runner.setup()
     try:
         site = web.TCPSite(runner, host=config.webhook_host, port=config.webhook_port)
@@ -399,14 +408,39 @@ async def _run_webhook_server(
             config.webhook_path,
         )
 
-        stop_event = asyncio.Event() if stop_event is None else stop_event
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(sig, stop_event.set)
         await stop_event.wait()
     finally:
         await runner.cleanup()
+
+
+# Telegram is occasionally unreachable for a few seconds exactly when systemd
+# restarts us; retry instead of dying and waiting for the unit's backoff.
+STARTUP_ATTEMPTS = 4
+STARTUP_BASE_DELAY = 2.0
+
+
+async def _get_me_with_retry(bot: Bot) -> Any:
+    """`bot.get_me()` with a short exponential backoff (bounded, never infinite)."""
+    delay = STARTUP_BASE_DELAY
+    last_exc: Exception | None = None
+    for attempt in range(1, STARTUP_ATTEMPTS + 1):
+        try:
+            return await bot.get_me()
+        except (TelegramAPIError, OSError) as exc:
+            last_exc = exc
+            if attempt >= STARTUP_ATTEMPTS:
+                break
+            logger.warning(
+                "Telegram is unreachable (attempt %d/%d): %s — retrying in %.0fs",
+                attempt,
+                STARTUP_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+    assert last_exc is not None  # pragma: no cover
+    raise last_exc
 
 
 async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
@@ -451,7 +485,7 @@ async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
 
     try:
         await db.connect()
-        me = await bot.get_me()
+        me = await _get_me_with_retry(bot)
         bot_username = me.username or "BotUsername"
         if not me.supports_inline_queries:
             logger.warning(

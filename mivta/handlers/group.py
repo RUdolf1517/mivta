@@ -10,7 +10,11 @@ from collections import OrderedDict
 from collections.abc import Sequence
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramRetryAfter,
+)
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
@@ -54,8 +58,10 @@ from mivta.utils.languages import (
     resolve_auto_swap_target,
     resolve_language,
 )
+from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_business_query
 from mivta.utils.ratelimit import RateLimiter
+from mivta.utils.telegram import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -1196,6 +1202,7 @@ def build_group_router() -> Router:
         concurrency_sem: asyncio.Semaphore,
         inflight: dict[bytes, InflightEntry],
         bot_username: str = "BotUsername",
+        metrics: RuntimeMetrics | None = None,
     ) -> None:
         """Translate group messages starting with '>', repost with author header, delete draft."""
         if getattr(message, "is_automatic_forward", False):
@@ -1316,6 +1323,7 @@ def build_group_router() -> Router:
                     concurrency_sem=concurrency_sem,
                     inflight=inflight,
                     max_length=config.max_text_length,
+                    metrics=metrics,
                 )
             except TranslatorError as exc:
                 logger.warning(
@@ -1382,15 +1390,18 @@ def build_group_router() -> Router:
         # Golden rule: send translated message FIRST so user text is NEVER lost on send failure!
         try:
             if not is_caption:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=full_text,
-                    entities=all_entities,
-                    parse_mode=None,
-                    message_thread_id=thread_id,
-                    reply_parameters=reply_params,
-                    reply_markup=del_markup,
-                    disable_web_page_preview=True,
+                await call_with_retry(
+                    lambda: bot.send_message(
+                        chat_id=chat_id,
+                        text=full_text,
+                        entities=all_entities,
+                        parse_mode=None,
+                        message_thread_id=thread_id,
+                        reply_parameters=reply_params,
+                        reply_markup=del_markup,
+                        disable_web_page_preview=True,
+                    ),
+                    label="group repost",
                 )
             elif message.photo:
                 await bot.send_photo(
@@ -1463,7 +1474,14 @@ def build_group_router() -> Router:
             return
 
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+            await call_with_retry(
+                lambda: bot.delete_message(chat_id=chat_id, message_id=message.message_id),
+                label="group draft delete",
+            )
+        except TelegramRetryAfter:
+            logger.warning(
+                "Group draft delete postponed by flood control in chat %s", chat_id
+            )
         except TelegramBadRequest:
             if state.mark_delete_hint_shown(chat_id):
                 ui = _group_ui(g_settings, message.from_user, config)

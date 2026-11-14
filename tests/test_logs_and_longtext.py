@@ -21,6 +21,7 @@ from mivta.handlers.commands import cmd_logs, cmd_status, handle_owner_service_c
 from mivta.translator.base import (
     TranslationRequest,
     TranslationResult,
+    TranslatorTimeoutError,
 )
 from mivta.translator.base import (
     Translator as BaseTranslator,
@@ -438,6 +439,159 @@ async def test_chunked_translation_short_text_uses_one_call() -> None:
     assert translator.calls == 1
     assert outcome.translated_text == "[короткий текст]"
 
+
+@dataclass
+class _SlowTranslator:
+    """Fake provider with a fixed per-call latency that records peak concurrency."""
+
+    name: str = "slow"
+    uses_llm_glossary: bool = False
+    delay: float = 0.05
+    calls: int = 0
+    in_flight: int = 0
+    peak: int = 0
+
+    async def translate(self, request: TranslationRequest) -> TranslationResult:
+        self.calls += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+            return TranslationResult(
+                translated_text=request.text.upper(),
+                source_lang="ru",
+                target_lang=request.target_lang,
+                provider=self.name,
+                style=request.style,
+            )
+        finally:
+            self.in_flight -= 1
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _run_chunked_with(
+    translator,
+    text: str,
+    max_length: int,
+    *,
+    burst: int = 200,
+    sem_size: int = 8,
+    max_chunks: int = 12,
+    cache: TranslationCache | None = None,
+):
+    from mivta.handlers.pipeline import execute_chunked_translation
+
+    cache = TranslationCache(max_size=256, ttl_seconds=60) if cache is None else cache
+    limiter = RateLimiter(rate_per_minute=6000.0, burst=burst)
+    outcome = await execute_chunked_translation(
+        user_id=1,
+        request=TranslationRequest(text=text, source_lang="ru", target_lang="en"),
+        translator=translator,
+        cache=cache,
+        rate_limiter=limiter,
+        concurrency_sem=asyncio.Semaphore(sem_size),
+        inflight={},
+        max_length=max_length,
+        max_chunks=max_chunks,
+    )
+    return outcome, cache, limiter
+
+
+@pytest.mark.asyncio
+async def test_chunked_translation_runs_chunks_concurrently() -> None:
+    """Chunks are independent: N pieces must cost ~1 round-trip, not N."""
+    text = " ".join(f"word{index}" for index in range(60))
+    translator = _SlowTranslator(delay=0.05)
+
+    started = asyncio.get_running_loop().time()
+    outcome, _, _ = await _run_chunked_with(translator, text, 50)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert translator.calls >= 4
+    assert translator.peak >= 2, "chunks must overlap instead of running one by one"
+    # Sequential execution would need calls * delay; concurrency stays near one delay.
+    assert elapsed < translator.calls * translator.delay * 0.6, (
+        f"{elapsed:.3f}s for {translator.calls} chunks at {translator.delay}s each"
+    )
+    assert outcome.translated_text.startswith("WORD0 ")
+
+
+@pytest.mark.asyncio
+async def test_chunked_translation_charges_one_rate_limit_token() -> None:
+    """One message costs one token no matter how many chunks it fans out to."""
+    text = " ".join(f"word{index}" for index in range(60))
+    translator = _SlowTranslator(delay=0.0)
+
+    outcome, _, limiter = await _run_chunked_with(translator, text, 50, burst=1)
+    assert translator.calls >= 4
+    assert isinstance(outcome.translated_text, str)
+
+    # burst=1 was spent on the message itself, so the next message is throttled
+    allowed, _ = limiter.allow(1)
+    assert allowed is False
+
+
+@pytest.mark.asyncio
+async def test_chunked_translation_fully_cached_costs_no_token() -> None:
+    """A repeated message is served from cache without touching the rate limiter."""
+    text = " ".join(f"word{index}" for index in range(60))
+    translator = _SlowTranslator(delay=0.0)
+    shared_cache = TranslationCache(max_size=256, ttl_seconds=60)
+
+    await _run_chunked_with(translator, text, 50, burst=1, cache=shared_cache)
+    calls_after_first = translator.calls
+    assert calls_after_first >= 4
+
+    # Second run with a fresh limiter: every chunk is cached, so nothing is charged
+    outcome, _, limiter = await _run_chunked_with(
+        translator, text, 50, burst=1, cache=shared_cache
+    )
+    assert translator.calls == calls_after_first
+    allowed, _ = limiter.allow(1)
+    assert allowed is True
+    assert outcome.translated_text
+
+
+@pytest.mark.asyncio
+async def test_chunked_translation_cancels_siblings_on_failure() -> None:
+    """A failing chunk must not leave the other chunk requests running."""
+
+    @dataclass
+    class _FailingTranslator:
+        name: str = "boom"
+        uses_llm_glossary: bool = False
+        calls: int = 0
+        live: int = 0
+
+        async def translate(self, request: TranslationRequest) -> TranslationResult:
+            self.calls += 1
+            self.live += 1
+            try:
+                if request.text.startswith("word1"):
+                    await asyncio.sleep(0.02)
+                    raise TranslatorTimeoutError("boom")
+                await asyncio.sleep(0.2)
+                return TranslationResult(
+                    translated_text=request.text,
+                    source_lang="ru",
+                    target_lang=request.target_lang,
+                    provider=self.name,
+                    style=request.style,
+                )
+            finally:
+                self.live -= 1
+
+        async def aclose(self) -> None:
+            return None
+
+    translator = _FailingTranslator()
+    text = " ".join(f"word{index}" for index in range(40))
+    with pytest.raises(TranslatorTimeoutError):
+        await _run_chunked_with(translator, text, 40)
+    # Sibling requests were cancelled rather than left dangling
+    assert translator.live == 0
 
 @pytest.mark.asyncio
 async def test_chunked_translation_reports_too_long() -> None:

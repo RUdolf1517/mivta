@@ -1655,6 +1655,42 @@ def _service_state_line(lang: str, config: Config) -> str:
     return f"• Обновление из Telegram: <b>{updates}</b> · Перезапуск: <b>{restarts}</b>"
 
 
+def _latency_line(metrics: RuntimeMetrics | None, lang: str) -> str:
+    """One line of provider round-trip latency percentiles (no text, no user data)."""
+    if metrics is None or metrics.latency_samples == 0:
+        return (
+            "  ⏱ no translations yet"
+            if lang == "en"
+            else "  ⏱ переводов пока не было"
+        )
+    p50 = metrics.latency_percentile(50)
+    p95 = metrics.latency_percentile(95)
+    p99 = metrics.latency_percentile(99)
+    samples = metrics.latency_samples
+    if lang == "en":
+        return (
+            f"  ⏱ Latency: <b>{_fmt_seconds(p50, 'en')}</b> p50 / "
+            f"<b>{_fmt_seconds(p95, 'en')}</b> p95 / <b>{_fmt_seconds(p99, 'en')}</b> p99 "
+            f"({samples} samples)"
+        )
+    return (
+        f"  ⏱ Задержка: <b>{_fmt_seconds(p50)}</b> p50 / "
+        f"<b>{_fmt_seconds(p95)}</b> p95 / <b>{_fmt_seconds(p99)}</b> p99 "
+        f"(замеров: {samples})"
+    )
+
+
+def _fmt_seconds(value: float | None, lang: str = "ru") -> str:
+    """Format a duration for the owner dashboard: ms below 10 s, seconds above."""
+    if value is None:
+        return "—"
+    ms_unit = "ms" if lang == "en" else "мс"
+    s_unit = "s" if lang == "en" else "с"
+    if value < 10.0:
+        return f"{value * 1000:.0f} {ms_unit}" if value >= 0.1 else f"{value * 1000:.1f} {ms_unit}"
+    return f"{value:.1f} {s_unit}"
+
+
 def _render_owner_status_html(
     *,
     lang: str,
@@ -1720,13 +1756,16 @@ def _render_owner_status_html(
     else:
         cache_line = "• Disabled" if lang == "en" else "• Отключён"
 
+    latency_line = _latency_line(metrics, lang)
+
     providers_block = "\n".join(provider_lines) or "  —"
     if lang == "en":
         return (
             f"📊 <b>Status {handle}</b> · <code>v{escape(__version__)}</code>\n"
             f"Mode: <code>{mode}</code> · Uptime: <b>{uptime_str}</b>\n\n"
             f"🔌 <b>Translation chain</b> (now serving: <code>{active_name}</code>)\n"
-            f"{providers_block}\n\n"
+            f"{providers_block}\n"
+            f"{latency_line}\n\n"
             "👥 <b>Users &amp; chats</b>\n"
             f"• Active users (session): <b>{session_users}</b>\n"
             f"• Saved user profiles (DB): <b>{db_stats.saved_users}</b>\n"
@@ -1748,7 +1787,8 @@ def _render_owner_status_html(
         f"📊 <b>Статус {handle}</b> · <code>v{escape(__version__)}</code>\n"
         f"Режим: <code>{mode}</code> · Аптайм: <b>{uptime_str}</b>\n\n"
         f"🔌 <b>Цепочка перевода</b> (активен сейчас: <code>{active_name}</code>)\n"
-        f"{providers_block}\n\n"
+        f"{providers_block}\n"
+        f"{latency_line}\n\n"
         "👥 <b>Аудитория и чаты</b>\n"
         f"• Уникальных юзеров за сессию: <b>{session_users}</b>\n"
         f"• Профилей в БД: <b>{db_stats.saved_users}</b>\n"

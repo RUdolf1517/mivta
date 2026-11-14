@@ -29,8 +29,10 @@ from mivta.utils.cache import TranslationCache
 from mivta.utils.formatting import prepare_text_for_translation, restore_formatted_text
 from mivta.utils.i18n import resolve_ui_lang
 from mivta.utils.languages import resolve_auto_swap_target
+from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_business_query
 from mivta.utils.ratelimit import RateLimiter
+from mivta.utils.telegram import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,10 @@ async def _notify_owner_privately(bot: Bot, user_chat_id: int | None, text: str)
     if not user_chat_id:
         return
     with contextlib.suppress(TelegramAPIError):
-        await bot.send_message(chat_id=user_chat_id, text=text)
+        await call_with_retry(
+            lambda: bot.send_message(chat_id=user_chat_id, text=text),
+            label="business notify",
+        )
 
 
 async def _resolve_connection(
@@ -148,6 +153,7 @@ async def handle_business_message(
     rate_limiter: RateLimiter,
     concurrency_sem: asyncio.Semaphore,
     inflight: dict[bytes, InflightEntry],
+    metrics: RuntimeMetrics | None = None,
 ) -> None:
     """Translate outgoing owner text or media captions prefixed with `>` in-place."""
     conn_id = message.business_connection_id
@@ -273,6 +279,7 @@ async def handle_business_message(
                 concurrency_sem=concurrency_sem,
                 inflight=inflight,
                 max_length=config.max_text_length,
+                metrics=metrics,
             )
         except TranslatorError as exc:
             logger.warning(
