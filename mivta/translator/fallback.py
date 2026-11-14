@@ -63,7 +63,9 @@ class FallbackTranslator(Translator):
             raise ValueError("FallbackTranslator requires at least one provider")
         self._providers = tuple(providers)
         self.name = "->".join(p.name for p in self._providers)
-        self.supports_styles = self._providers[0].supports_styles
+        # Style variants only make sense if *some* provider can honour them; asking
+        # the primary for three tones it cannot produce would yield N identical cards.
+        self.supports_styles = any(p.supports_styles for p in self._providers)
         self.uses_llm_glossary = all(p.uses_llm_glossary for p in self._providers)
 
         self._unavailable_cooldown = max(0.0, unavailable_cooldown)
@@ -100,6 +102,18 @@ class FallbackTranslator(Translator):
         if isinstance(exc, (TranslatorTimeoutError, TranslatorUnavailableError)):
             return self._unavailable_cooldown
         return 0.0
+
+    def _has_roomier_fallback(
+        self,
+        exc: TranslatorError,
+        position: int,
+        candidates: Sequence[tuple[int, Translator]],
+    ) -> bool:
+        """True when a later provider accepts input longer than the failing one."""
+        if not isinstance(exc, TextTooLongError):
+            return False
+        failed_limit = candidates[position][1].max_length
+        return any(prov.max_length > failed_limit for _, prov in candidates[position + 1 :])
 
     def _record_failure(self, idx: int, exc: TranslatorError) -> None:
         self._failure_counts[idx] += 1
@@ -160,7 +174,9 @@ class FallbackTranslator(Translator):
                 self._record_success(orig_idx)
                 return result
             except TranslatorError as exc:
-                if _is_local_validation_error(exc, request):
+                if _is_local_validation_error(exc, request) and not self._has_roomier_fallback(
+                    exc, pos, candidates
+                ):
                     raise
                 self._record_failure(orig_idx, exc)
                 if pos == total - 1:
@@ -177,12 +193,20 @@ class FallbackTranslator(Translator):
         assert last_exc is not None  # pragma: no cover
         raise last_exc
 
+    def _style_candidates(self) -> list[tuple[int, Translator]]:
+        """Candidates ordered so that providers honouring styles come first."""
+        candidates = self._ordered_candidates()
+        if any(prov.supports_styles for _, prov in candidates):
+            capable = [c for c in candidates if c[1].supports_styles]
+            return capable + [c for c in candidates if not c[1].supports_styles]
+        return candidates
+
     async def translate_styles(
         self,
         request: TranslationRequest,
         styles: Sequence[TranslationStyle],
     ) -> list[TranslationResult]:
-        candidates = self._ordered_candidates()
+        candidates = self._style_candidates()
         total = len(candidates)
         last_exc: TranslatorError | None = None
         for pos, (orig_idx, provider) in enumerate(candidates):
@@ -191,7 +215,9 @@ class FallbackTranslator(Translator):
                 self._record_success(orig_idx)
                 return results
             except TranslatorError as exc:
-                if _is_local_validation_error(exc, request):
+                if _is_local_validation_error(exc, request) and not self._has_roomier_fallback(
+                    exc, pos, candidates
+                ):
                     raise
                 self._record_failure(orig_idx, exc)
                 if pos == total - 1:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -21,6 +22,7 @@ from mivta.utils.formatting import (
     join_translated_chunks,
     split_for_translation,
 )
+from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.ratelimit import RateLimiter
 
 TELEGRAM_MAX_MESSAGE_LEN = 4096
@@ -89,6 +91,7 @@ async def _singleflight_translate(
     cache: TranslationCache,
     concurrency_sem: asyncio.Semaphore,
     inflight: dict[bytes, InflightEntry],
+    metrics: RuntimeMetrics | None = None,
 ) -> TranslationResult:
     cached = cache.get(translator.name, request)
     if cached is not None:
@@ -100,15 +103,20 @@ async def _singleflight_translate(
 
         async def _run() -> TranslationResult:
             async with concurrency_sem:
-                first = await translator.translate(request)
-                if _should_provider_swap(request, first):
-                    swapped_req = replace(
-                        request,
-                        target_lang=request.swap_lang,
-                        swap_lang="",
-                    )
-                    return await translator.translate(swapped_req)
-                return first
+                started = time.perf_counter()
+                try:
+                    first = await translator.translate(request)
+                    if _should_provider_swap(request, first):
+                        swapped_req = replace(
+                            request,
+                            target_lang=request.swap_lang,
+                            swap_lang="",
+                        )
+                        return await translator.translate(swapped_req)
+                    return first
+                finally:
+                    if metrics is not None:
+                        metrics.record_translation_latency(time.perf_counter() - started)
 
         task = asyncio.create_task(_run())
         # Suppress "Task exception was never retrieved" if all waiters cancel before completion
@@ -152,6 +160,7 @@ async def execute_translation(
     rate_limiter: RateLimiter,
     concurrency_sem: asyncio.Semaphore,
     inflight: dict[bytes, InflightEntry],
+    metrics: RuntimeMetrics | None = None,
 ) -> TranslationResult | RateLimitedOutcome:
     """Resolve translation via cache, per-user rate limiter, and singleflight upstream call."""
     cached = cache.get(translator.name, request)
@@ -168,6 +177,7 @@ async def execute_translation(
         cache=cache,
         concurrency_sem=concurrency_sem,
         inflight=inflight,
+        metrics=metrics,
     )
 
 
@@ -190,6 +200,7 @@ async def execute_chunked_translation(
     inflight: dict[bytes, InflightEntry],
     max_length: int,
     max_chunks: int = MAX_TRANSLATION_CHUNKS,
+    metrics: RuntimeMetrics | None = None,
 ) -> TranslationResult | RateLimitedOutcome | TextTooLong:
     """Translate a long text by provider-sized chunks (one rate-limit token total)."""
     text = request.text
@@ -202,6 +213,7 @@ async def execute_chunked_translation(
             rate_limiter=rate_limiter,
             concurrency_sem=concurrency_sem,
             inflight=inflight,
+            metrics=metrics,
         )
 
     chunks = split_for_translation(text, max_length, max_chunks=max_chunks)
@@ -216,33 +228,46 @@ async def execute_chunked_translation(
             rate_limiter=rate_limiter,
             concurrency_sem=concurrency_sem,
             inflight=inflight,
+            metrics=metrics,
         )
 
-    results: list[TranslationResult] = []
-    for index, chunk in enumerate(chunks.chunks):
-        chunk_request = replace(request, text=chunk)
-        if index == 0:
-            # Only the first chunk consumes a rate-limit token: one message = one request
-            outcome = await execute_translation(
-                user_id=user_id,
-                request=chunk_request,
-                translator=translator,
-                cache=cache,
-                rate_limiter=rate_limiter,
-                concurrency_sem=concurrency_sem,
-                inflight=inflight,
+    chunk_requests = [replace(request, text=chunk) for chunk in chunks.chunks]
+
+    # A fully cached text costs nothing; otherwise the whole message still
+    # charges exactly one rate-limit token, however many chunks it fans out to.
+    cached_hits = [cache.get(translator.name, req) for req in chunk_requests]
+    if all(hit is not None for hit in cached_hits):
+        results: list[TranslationResult] = [hit for hit in cached_hits if hit is not None]
+    else:
+        allowed, retry_after = rate_limiter.allow(user_id)
+        if not allowed:
+            return RateLimitedOutcome(retry_after=retry_after)
+
+        # Chunks are independent, so translate them concurrently instead of
+        # paying N sequential provider round-trips (up to ~9 for a 4096-char
+        # message at the default MAX_TEXT_LENGTH of 500).
+        tasks = [
+            asyncio.create_task(
+                _singleflight_translate(
+                    request=req,
+                    translator=translator,
+                    cache=cache,
+                    concurrency_sem=concurrency_sem,
+                    inflight=inflight,
+                    metrics=metrics,
+                )
             )
-        else:
-            outcome = await _singleflight_translate(
-                request=chunk_request,
-                translator=translator,
-                cache=cache,
-                concurrency_sem=concurrency_sem,
-                inflight=inflight,
-            )
-        if isinstance(outcome, RateLimitedOutcome):
-            return outcome
-        results.append(outcome)
+            for req in chunk_requests
+        ]
+        try:
+            results = list(await asyncio.gather(*tasks))
+        except Exception:
+            # Preserve the old fail-fast behaviour: drop the sibling requests
+            # instead of letting them run to completion for a result we discard.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     first = results[0]
     return TranslationResult(
@@ -266,6 +291,7 @@ async def execute_multistyle_translation(
     cache: TranslationCache,
     rate_limiter: RateLimiter,
     concurrency_sem: asyncio.Semaphore,
+    metrics: RuntimeMetrics | None = None,
 ) -> list[TranslationResult] | RateLimitedOutcome:
     """Resolve multiple style variants at once (charging at most 1 rate-limit token)."""
     ordered = deduplicate_styles(styles) or [request.style]
@@ -287,15 +313,20 @@ async def execute_multistyle_translation(
         return RateLimitedOutcome(retry_after=retry_after)
 
     async with concurrency_sem:
-        fetched = await translator.translate_styles(request, missing)
-        if fetched and _should_provider_swap(request, fetched[0]):
-            swapped_req = replace(
-                request,
-                target_lang=request.swap_lang,
-                swap_lang="",
-            )
-            fetched = await translator.translate_styles(swapped_req, ordered)
-            cached_by_style.clear()
+        started = time.perf_counter()
+        try:
+            fetched = await translator.translate_styles(request, missing)
+            if fetched and _should_provider_swap(request, fetched[0]):
+                swapped_req = replace(
+                    request,
+                    target_lang=request.swap_lang,
+                    swap_lang="",
+                )
+                fetched = await translator.translate_styles(swapped_req, ordered)
+                cached_by_style.clear()
+        finally:
+            if metrics is not None:
+                metrics.record_translation_latency(time.perf_counter() - started)
 
     for res in fetched:
         cached_by_style[res.style] = res
@@ -319,6 +350,7 @@ async def execute_multilang_translation(
     rate_limiter: RateLimiter,
     concurrency_sem: asyncio.Semaphore,
     inflight: dict[bytes, InflightEntry],
+    metrics: RuntimeMetrics | None = None,
 ) -> list[TranslationResult] | RateLimitedOutcome:
     """Resolve multiple target languages concurrently (charging 1 rate-limit token per query)."""
     ordered_targets: list[str] = []
@@ -349,6 +381,7 @@ async def execute_multilang_translation(
                 cache=cache,
                 concurrency_sem=concurrency_sem,
                 inflight=inflight,
+                metrics=metrics,
             )
             for req in requests
         )

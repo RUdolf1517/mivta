@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
 from aiogram.types import MessageEntity
 
-from mivta.utils.utf16 import U16OffsetMap, has_astral_chars
+from mivta.utils.utf16 import U16OffsetMap, build_utf16_offsets, utf16_len
 
 _VERBATIM_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -49,22 +49,9 @@ _URL_RE = re.compile(r"https?://[^\s<>]+")
 _MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@[A-Za-z][A-Za-z0-9_]{2,31}\b")
 
 
-def utf16_len(text: str) -> int:
-    """Return string length in UTF-16 code units as required by Telegram Bot API."""
-    return len(text.encode("utf-16-le")) // 2
-
-
-def build_utf16_offsets(text: str) -> list[int]:
-    """Build cumulative UTF-16 code-unit offsets for each Python character index."""
-    if not has_astral_chars(text):
-        # BMP-only: one code point is exactly one UTF-16 unit
-        return list(range(len(text) + 1))
-    offsets = [0] * (len(text) + 1)
-    acc = 0
-    for idx, ch in enumerate(text):
-        acc += 2 if ord(ch) > 0xFFFF else 1
-        offsets[idx + 1] = acc
-    return offsets
+# Re-exported for backwards compatibility: these helpers live in `mivta.utils.utf16`
+# so that `formatting.py` and `parser.py` share one implementation.
+__all__ = ["build_utf16_offsets", "utf16_len"]
 
 
 def _trim_url_match(raw_url: str) -> str:
@@ -173,11 +160,22 @@ class _IntervalSet:
 def _crosses_verbatim_boundary(
     start: int,
     end: int,
-    verbatims: Sequence[_VerbatimSpan],
+    verbatim_starts: Sequence[int],
+    verbatim_ends: Sequence[int],
 ) -> bool:
-    """Return True if [start, end) partially cuts through a verbatim span."""
-    for v in verbatims:
-        if start < v.end and v.start < end and not (start <= v.start and v.end <= end):
+    """Return True if [start, end) partially cuts through a verbatim span.
+
+    `verbatim_starts` must be sorted ascending; only the spans that can possibly
+    intersect [start, end) are then inspected.
+    """
+    idx = bisect_right(verbatim_starts, start)
+    low = max(0, idx - 1)
+    for i in range(low, len(verbatim_starts)):
+        v_start = verbatim_starts[i]
+        if v_start >= end:
+            break
+        v_end = verbatim_ends[i]
+        if start < v_end and v_start < end and not (start <= v_start and v_end <= end):
             return True
     return False
 
@@ -492,11 +490,15 @@ def prepare_text_for_translation(
                     occupied.add(s, e)
 
     verbatims.sort(key=lambda v: v.start)
+    # Verbatim spans never overlap each other, so sorted starts imply sorted ends
+    # and boundary checks become a bisect instead of a scan over every span.
+    verbatim_starts = [v.start for v in verbatims]
+    verbatim_ends = [v.end for v in verbatims]
 
     # Keep properly nested style spans (no partial overlap with verbatim or earlier style spans)
     accepted_styles: list[_StyleSpan] = []
     for py_start, py_end, ent in sorted(candidate_styles, key=lambda item: (item[0], -item[1])):
-        if _crosses_verbatim_boundary(py_start, py_end, verbatims):
+        if _crosses_verbatim_boundary(py_start, py_end, verbatim_starts, verbatim_ends):
             continue
         crosses_style = False
         for existing in accepted_styles:
@@ -710,7 +712,7 @@ def restore_formatted_text(
     if emit_entities_only_if_rich and not has_rich_entity and not prepared.had_explicit_entities:
         return RestoredFormatting(text=final_text, entities=None)
 
-    u16_offsets = build_utf16_offsets(final_text)
+    u16_map = U16OffsetMap(final_text)
     final_entities: list[MessageEntity] = []
     for py_start, py_end, tmpl in recorded_spans:
         if py_start >= final_py_len:
@@ -718,8 +720,8 @@ def restore_formatted_text(
         clamped_end = min(py_end, final_py_len)
         if clamped_end <= py_start:
             continue
-        u_off = u16_offsets[py_start]
-        u_len = u16_offsets[clamped_end] - u_off
+        u_off = u16_map.to_utf16(py_start)
+        u_len = u16_map.to_utf16(clamped_end) - u_off
         if u_len <= 0:
             continue
         final_entities.append(tmpl.model_copy(update={"offset": u_off, "length": u_len}))

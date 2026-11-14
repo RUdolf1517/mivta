@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -322,6 +323,104 @@ async def test_check_update_git_up_to_date(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+class _FlakyBot:
+    """Bot stub that fails the first `failures` `get_me()` calls."""
+
+    def __init__(self, failures: int, calls: list[int]) -> None:
+        self.failures = failures
+        self.calls = calls
+
+    async def get_me(self) -> types.SimpleNamespace:
+        self.calls.append(1)
+        if len(self.calls) <= self.failures:
+            raise OSError("telegram is down")
+        return types.SimpleNamespace(username="mivtabot")
+
+
+async def test_get_me_retries_then_succeeds() -> None:
+    """A briefly unreachable Telegram must not kill startup."""
+    import mivta.bot as bot_module
+
+    calls: list[int] = []
+    slept: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    original_sleep = bot_module.asyncio.sleep
+    bot_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
+    try:
+        me = await bot_module._get_me_with_retry(_FlakyBot(failures=2, calls=calls))
+    finally:
+        bot_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+    assert me.username == "mivtabot"
+    assert len(calls) == 3
+    assert slept == [bot_module.STARTUP_BASE_DELAY, bot_module.STARTUP_BASE_DELAY * 2]
+
+
+async def test_get_me_gives_up_after_budget() -> None:
+    import mivta.bot as bot_module
+
+    calls: list[int] = []
+
+    async def _fake_sleep(_seconds: float) -> None:
+        return None
+
+    original_sleep = bot_module.asyncio.sleep
+    bot_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
+    try:
+        with pytest.raises(OSError, match="telegram is down"):
+            await bot_module._get_me_with_retry(
+                _FlakyBot(failures=bot_module.STARTUP_ATTEMPTS, calls=calls)
+            )
+    finally:
+        bot_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+    assert len(calls) == bot_module.STARTUP_ATTEMPTS
+
+
+async def test_parse_version_treats_prerelease_as_older() -> None:
+    """`v7.3-rc1` must never advertise itself as newer than the `7.3` final release."""
+    from mivta.service import _is_newer, _normalize_version, _parse_version
+
+    assert _normalize_version("v7.3-rc1") == (7, 3)
+    assert _parse_version("v7.3-rc1").is_prerelease is True
+    assert _parse_version("v7.3").is_prerelease is False
+
+    # Same numbers: the final release wins, the pre-release does not
+    assert _is_newer(_parse_version("v7.3-rc1"), "7.3") is False
+    assert _is_newer(_parse_version("v7.3"), "7.3-rc1") is True
+    # A pre-release of the *next* version is still an update
+    assert _is_newer(_parse_version("v7.4-rc1"), "7.3") is True
+    assert _is_newer(_parse_version("v8.0-rc2"), "7.3") is True
+    # Ordinary ordering is untouched
+    assert _is_newer(_parse_version("v7.10"), "7.3") is True
+    assert _is_newer(_parse_version("v7.2"), "7.3") is False
+    assert _is_newer(_parse_version("v7.3"), "7.3") is False
+    assert _is_newer(_parse_version("nonsense"), "7.3") is False
+
+
+async def test_release_update_info_ignores_prerelease_suffix(tmp_path: Path) -> None:
+    """A `-rc` tag must not flip `/update` into 'new version available'."""
+    cfg = _config(tmp_path)
+
+    async def fake_prerelease(repo: str, timeout: float) -> dict[str, Any] | None:
+        return {"tag_name": "v7.3-rc1", "html_url": "https://example.invalid/rc1"}
+
+    info = await check_update(cfg, root=tmp_path, fetch_release=fake_prerelease)
+    assert info.source == "release"
+    assert info.latest_version == "7.3"
+    assert info.available is False
+
+    async def fake_next_rc(repo: str, timeout: float) -> dict[str, Any] | None:
+        return {"tag_name": "v99.1-rc1", "html_url": "https://example.invalid/next"}
+
+    info = await check_update(cfg, root=tmp_path, fetch_release=fake_next_rc)
+    assert info.latest_version == "99.1"
+    assert info.available is True
+
+
 async def test_check_update_falls_back_to_github_release(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     newer = {"tag_name": "v99.1.0", "html_url": "https://github.com/x/y/releases/tag/v99.1.0"}

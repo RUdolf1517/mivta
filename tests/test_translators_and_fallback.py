@@ -36,11 +36,13 @@ class ScriptedProvider(Translator):
         supports_styles: bool = False,
         uses_llm_glossary: bool = False,
         fail_with: TranslatorError | None = None,
+        max_length: int = 500,
     ) -> None:
         self.name = name
         self.supports_styles = supports_styles
         self.uses_llm_glossary = uses_llm_glossary
         self.fail_with = fail_with
+        self._max_length = max_length
         self.calls: int = 0
         self.style_calls: int = 0
         self.closed: bool = False
@@ -148,6 +150,68 @@ async def test_fallback_translator_chain_multistyle_glossary_flags_and_close() -
 
     await chain.aclose()
     assert p_llm1.closed and p_llm2.closed and p_google.closed
+
+
+async def test_fallback_supports_styles_uses_whole_chain() -> None:
+    """Style cards must appear when *any* provider in the chain can produce them."""
+    google = ScriptedProvider("google", supports_styles=False)
+    llm = ScriptedProvider("openai", supports_styles=True, uses_llm_glossary=True)
+
+    chain = FallbackTranslator([google, llm])
+    assert chain.supports_styles is True
+
+    styles = [TranslationStyle.NEUTRAL, TranslationStyle.CASUAL, TranslationStyle.FORMAL]
+    results = await chain.translate_styles(
+        TranslationRequest(text="Hello", target_lang="ru"), styles
+    )
+    # The style-incapable primary is skipped instead of returning three identical cards
+    assert [r.translated_text for r in results] == [
+        "openai:neutral:Hello",
+        "openai:casual:Hello",
+        "openai:formal:Hello",
+    ]
+    assert google.calls == 0
+    assert google.style_calls == 0
+
+    # A plain translation still prefers the primary provider
+    single = await chain.translate(TranslationRequest(text="Hello", target_lang="ru"))
+    assert single.provider == "google"
+
+
+async def test_fallback_chain_without_styles_reports_false() -> None:
+    chain = FallbackTranslator(
+        [
+            ScriptedProvider("google", supports_styles=False),
+            ScriptedProvider("mymemory", supports_styles=False),
+        ]
+    )
+    assert chain.supports_styles is False
+
+
+async def test_text_too_long_falls_through_to_a_roomier_provider() -> None:
+    """A longer-limit backup should get the chance the strict primary denied."""
+    strict = ScriptedProvider("strict", max_length=10, fail_with=TextTooLongError("too long"))
+    roomy = ScriptedProvider("roomy", max_length=500)
+    chain = FallbackTranslator([strict, roomy])
+
+    res = await chain.translate(TranslationRequest(text="x" * 50, target_lang="ru"))
+    assert res.translated_text == "roomy:" + "x" * 50
+    assert strict.calls == 1
+
+
+async def test_text_too_long_still_fails_fast_when_nobody_is_roomier() -> None:
+    strict = ScriptedProvider("strict", max_length=10, fail_with=TextTooLongError("too long"))
+    also_strict = ScriptedProvider("also_strict", max_length=10)
+    chain = FallbackTranslator([strict, also_strict])
+
+    with pytest.raises(TextTooLongError):
+        await chain.translate(TranslationRequest(text="x" * 50, target_lang="ru"))
+    assert also_strict.calls == 0
+
+
+async def test_provider_max_length_is_public() -> None:
+    assert ScriptedProvider("x", max_length=123).max_length == 123
+    assert FallbackTranslator([ScriptedProvider("x", max_length=7)]).max_length == 500
 
 
 async def test_factory_presets_deduplication_http_client_and_unknown_provider() -> None:

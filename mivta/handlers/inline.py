@@ -43,6 +43,7 @@ from mivta.utils.cache import TranslationCache
 from mivta.utils.formatting import prepare_text_for_translation, restore_formatted_text
 from mivta.utils.i18n import resolve_ui_lang, style_label
 from mivta.utils.languages import resolve_auto_swap_target
+from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_inline_query, truncate_preview
 from mivta.utils.ratelimit import RateLimiter
 
@@ -176,6 +177,7 @@ async def handle_inline_query(
     inflight: dict[bytes, InflightEntry],
     inline_active: dict[int, tuple[int, asyncio.Task[Any]]],
     inline_seq: list[int],
+    metrics: RuntimeMetrics | None = None,
 ) -> None:
     """Translate inline input directly inside any Telegram chat with keystroke coalescing."""
     user_id = inline_query.from_user.id
@@ -366,6 +368,7 @@ async def handle_inline_query(
                 rate_limiter=rate_limiter,
                 concurrency_sem=concurrency_sem,
                 inflight=inflight,
+                metrics=metrics,
             )
         elif multistyle_mode:
             raw_outcome = await execute_multistyle_translation(
@@ -376,6 +379,7 @@ async def handle_inline_query(
                 cache=cache,
                 rate_limiter=rate_limiter,
                 concurrency_sem=concurrency_sem,
+                metrics=metrics,
             )
         else:
             single = await execute_translation(
@@ -386,6 +390,7 @@ async def handle_inline_query(
                 rate_limiter=rate_limiter,
                 concurrency_sem=concurrency_sem,
                 inflight=inflight,
+                metrics=metrics,
             )
             raw_outcome = single if isinstance(single, RateLimitedOutcome) else [single]
     except asyncio.CancelledError:

@@ -219,25 +219,49 @@ class UpdateInfo:
         return self.source in ("git", "release") and self.error is None
 
 
-def _normalize_version(raw: str) -> tuple[int, ...]:
+@dataclass(frozen=True, slots=True)
+class _ParsedVersion:
+    """Numeric release numbers plus a pre-release flag.
+
+    A pre-release suffix (`-rc1`, `-beta.2`, `+build`) must rank *below* the
+    same numbers without it: naively folding `-rc1` into a fourth component
+    made `v7.3-rc1` compare as newer than `v7.3`.
+    """
+
+    numbers: tuple[int, ...]
+    is_prerelease: bool = False
+
+
+def _parse_version(raw: str) -> _ParsedVersion:
     cleaned = (raw or "").strip().lstrip("vV")
+    core, sep, suffix = cleaned.partition("-")
+    if not sep:
+        core, sep, suffix = cleaned.partition("+")
     parts: list[int] = []
-    for chunk in cleaned.replace("-", ".").replace("+", ".").split("."):
+    for chunk in core.split("."):
         digits = "".join(ch for ch in chunk if ch.isdigit())
         if not digits:
             break
         parts.append(int(digits[:9]))
-    return tuple(parts)
+    return _ParsedVersion(tuple(parts), is_prerelease=bool(sep and suffix))
 
 
-def _is_newer(candidate: tuple[int, ...], current: str) -> bool:
-    if not candidate:
+def _normalize_version(raw: str) -> tuple[int, ...]:
+    """Numeric release numbers of `raw`, ignoring any pre-release/build suffix."""
+    return _parse_version(raw).numbers
+
+
+def _is_newer(candidate: _ParsedVersion, current: str) -> bool:
+    if not candidate.numbers:
         return False
-    cur = _normalize_version(current)
-    width = max(len(candidate), len(cur))
-    padded = candidate + (0,) * (width - len(candidate))
-    current_padded = cur + (0,) * (width - len(cur))
-    return padded > current_padded
+    cur = _parse_version(current)
+    width = max(len(candidate.numbers), len(cur.numbers))
+    padded = candidate.numbers + (0,) * (width - len(candidate.numbers))
+    current_padded = cur.numbers + (0,) * (width - len(cur.numbers))
+    if padded != current_padded:
+        return padded > current_padded
+    # Identical numbers: a final release supersedes its own pre-releases.
+    return cur.is_prerelease and not candidate.is_prerelease
 
 
 async def check_update(
@@ -313,12 +337,12 @@ async def _release_update_info(
         return UpdateInfo(source="release", error="empty release response")
 
     tag = str(payload.get("tag_name") or "").strip()
-    latest = _normalize_version(tag)
+    latest = _parse_version(tag)
     url = payload.get("html_url")
     published = payload.get("published_at")
     return UpdateInfo(
         available=_is_newer(latest, __version__),
-        latest_version=".".join(str(p) for p in latest) or tag.lstrip("vV") or None,
+        latest_version=".".join(str(p) for p in latest.numbers) or tag.lstrip("vV") or None,
         release_url=str(url) if url else None,
         published_at=str(published)[:10] if published else None,
         source="release",

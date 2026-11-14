@@ -97,6 +97,9 @@ class TranslationResult:
     provider: str
 
 
+DEFAULT_MAX_LENGTH = 500
+
+
 class TranslatorError(Exception):
     """Base error for all translator failures."""
 
@@ -146,6 +149,13 @@ class Translator(ABC):
     name: str = "base"
     supports_styles: bool = False
     uses_llm_glossary: bool = False
+    #: Maximum accepted input length in Python characters; providers set it in `__init__`.
+    _max_length: int = DEFAULT_MAX_LENGTH
+
+    @property
+    def max_length(self) -> int:
+        """Largest input (in Python characters) this provider accepts in one call."""
+        return self._max_length
 
     @abstractmethod
     async def translate(self, request: TranslationRequest) -> TranslationResult:
