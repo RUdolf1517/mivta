@@ -401,7 +401,7 @@ async def test_direct_messages_are_not_translated(harness) -> None:
     assert len(session.calls) == 1
     reply = session.calls[0]
     assert isinstance(reply, SendMessage)
-    assert "Inline Mode" in reply.text
+    assert "инлайн-режим" in reply.text
     assert "@mivta_bot" in reply.text
 
 

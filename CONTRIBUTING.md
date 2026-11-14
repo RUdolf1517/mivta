@@ -77,6 +77,22 @@ API keys are needed to run the suite.
 | Entity / formatting change | UTF-16 surrogate-pair (emoji) offset tests in `tests/test_formatting.py` |
 | Installer or `systemd` change | `shellcheck install.sh` clean + E2E coverage in `tests/test_install_script.py` |
 | User-visible behaviour change | `CHANGELOG.md` entry |
+| Version bump | `mivta/__init__.py` + `pyproject.toml` updated together, matching the `vX.Y` release tag |
+
+### Versioning
+
+`mivta` uses a two-component `X.Y` version, where `X` is a feature release and
+`Y` is a patch:
+
+- **patch (`7.1`, `7.2`, …)** — bug fixes, documentation, UI polish, refactors,
+  new tests: anything that does not add a new user-facing scenario;
+- **feature (`8.0`)** — a new command, mode, provider, installer behaviour, or
+  any other capability a user would notice;
+- **tags** are `vX.Y`, and `mivta.__version__` must match the tag exactly —
+  `.github/workflows/release.yml` fails the release otherwise.
+
+Small pull requests are batched into one release instead of being tagged
+individually, so version numbers stay meaningful instead of racing ahead.
 
 Additionally:
 
