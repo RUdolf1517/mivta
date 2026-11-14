@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
+import time
 from html import escape
 from typing import Any
 
@@ -21,6 +23,18 @@ from aiogram.types import (
 from mivta import __version__
 from mivta.config import MAX_INLINE_EXTRA_LANGS, Config
 from mivta.database import Database, DatabaseStats, UserSettings
+from mivta.service import (
+    RestartController,
+    ServiceMarker,
+    UpdateInfo,
+    UpdatePlan,
+    apply_self_update,
+    check_update,
+    plan_update,
+    run_detached,
+    write_marker,
+    write_update_trigger,
+)
 from mivta.translator.base import ProviderStatus, TranslationStyle, Translator, parse_style
 from mivta.utils.cache import TranslationCache
 from mivta.utils.i18n import (
@@ -1391,6 +1405,31 @@ def _render_owner_status_html(
     )
 
 
+def _owner_setup_hint_html(lang: str, uid: int, command: str) -> str:
+    """Tell an unconfigured caller their own Telegram ID (and nothing else)."""
+    if lang == "en":
+        return (
+            f"🔒 <b>{escape(command)} is not configured yet.</b>\n\n"
+            f"Your numeric Telegram ID: <code>{uid}</code>\n"
+            f"Add <code>OWNER_ID={uid}</code> to <code>.env</code> "
+            "(or <code>/etc/mivta/mivta.env</code>) and restart the service."
+        )
+    return (
+        f"🔒 <b>Команда {escape(command)} ещё не настроена.</b>\n\n"
+        f"Ваш числовой Telegram ID: <code>{uid}</code>\n"
+        f"Добавьте <code>OWNER_ID={uid}</code> в <code>.env</code> "
+        "(или <code>/etc/mivta/mivta.env</code>) и перезапустите сервис."
+    )
+
+
+def _owner_denied_text(lang: str) -> str:
+    return (
+        "Access denied: this command is available only to the bot owner."
+        if lang == "en"
+        else "Доступ запрещён: команда доступна только владельцу бота."
+    )
+
+
 async def cmd_status(
     message: Message,
     db: Database,
@@ -1410,27 +1449,13 @@ async def cmd_status(
 
     if not config.owner_ids:
         await message.answer(
-            (
-                "🔒 <b>/status is not configured yet.</b>\n\n"
-                f"Your numeric Telegram ID: <code>{uid}</code>\n"
-                f"Add <code>OWNER_ID={uid}</code> to <code>.env</code> "
-                "(or <code>/etc/mivta/mivta.env</code>) and restart the service."
-                if lang == "en"
-                else "🔒 <b>Команда /status ещё не настроена.</b>\n\n"
-                f"Ваш числовой Telegram ID: <code>{uid}</code>\n"
-                f"Добавьте <code>OWNER_ID={uid}</code> в <code>.env</code> "
-                "(или <code>/etc/mivta/mivta.env</code>) и перезапустите сервис."
-            ),
+            _owner_setup_hint_html(lang, uid, "/status"),
             parse_mode=ParseMode.HTML,
         )
         return
 
     if uid not in config.owner_ids:
-        await message.answer(
-            "Access denied: /status is available only to the bot owner."
-            if lang == "en"
-            else "Доступ запрещён: команда /status доступна только владельцу бота."
-        )
+        await message.answer(_owner_denied_text(lang))
         return
 
     statuses = translator.get_provider_statuses()
@@ -1518,12 +1543,437 @@ async def handle_owner_status_callback(
     await callback.answer(toast)
 
 
+async def _edit_service_message(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Edit an owner service message, tolerating Telegram's "not modified" error."""
+    try:
+        await message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
+def _build_service_keyboard(
+    lang: str,
+    *,
+    update_available: bool,
+    confirm_restart: bool = False,
+) -> InlineKeyboardMarkup:
+    if lang == "en":
+        update_lbl = "⬆️ Update & restart"
+        restart_lbl = "🔄 Restart"
+        recheck_lbl = "🔎 Check again"
+        confirm_lbl = "✅ Yes, restart"
+        cancel_lbl = "✖️ Close"
+    else:
+        update_lbl = "⬆️ Обновить и перезапустить"
+        restart_lbl = "🔄 Перезапустить"
+        recheck_lbl = "🔎 Проверить снова"
+        confirm_lbl = "✅ Да, перезапустить"
+        cancel_lbl = "✖️ Закрыть"
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if confirm_restart:
+        rows.append([InlineKeyboardButton(text=confirm_lbl, callback_data="svc:restart")])
+    else:
+        if update_available:
+            rows.append([InlineKeyboardButton(text=update_lbl, callback_data="svc:update")])
+        rows.append(
+            [
+                InlineKeyboardButton(text=restart_lbl, callback_data="svc:restart"),
+                InlineKeyboardButton(text=recheck_lbl, callback_data="svc:check"),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=cancel_lbl, callback_data="svc:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _render_update_html(lang: str, info: UpdateInfo, config: Config) -> str:
+    """Human-readable result of an update check (EN / RU)."""
+    en = lang == "en"
+    if info.error is not None and info.source == "release":
+        return (
+            f"⚠️ <b>Could not check for updates.</b>\n"
+            f"<code>{escape(info.error[:200])}</code>\n\n"
+            "Update manually on the server:\n"
+            "<code>sudo /opt/mivta/install.sh --self-update</code>"
+            if en
+            else f"⚠️ <b>Не удалось проверить обновления.</b>\n"
+            f"<code>{escape(info.error[:200])}</code>\n\n"
+            "Обновите вручную на сервере:\n"
+            "<code>sudo /opt/mivta/install.sh --self-update</code>"
+        )
+    if info.error is not None:
+        return (
+            f"⚠️ <b>Could not reach the update source.</b>\n"
+            f"<code>{escape(info.error[:200])}</code>\n\n"
+            f"Installed: <code>v{escape(__version__)}</code>"
+            + (f" · rev <code>{escape(info.current_rev)}</code>" if info.current_rev else "")
+            if en
+            else f"⚠️ <b>Не удалось получить список обновлений.</b>\n"
+            f"<code>{escape(info.error[:200])}</code>\n\n"
+            f"Установлено: <code>v{escape(__version__)}</code>"
+            + (f" · rev <code>{escape(info.current_rev)}</code>" if info.current_rev else "")
+        )
+
+    lines: list[str] = []
+    if info.available:
+        lines.append("🆕 <b>Update available</b>" if en else "🆕 <b>Доступно обновление</b>")
+    else:
+        lines.append(
+            "✅ <b>Already up to date</b>" if en else "✅ <b>Обновлений нет — актуальная версия</b>"
+        )
+    lines.append(
+        f"• {'Installed' if en else 'Установлено'}: <code>v{escape(__version__)}</code>"
+        + (f" · rev <code>{escape(info.current_rev)}</code>" if info.current_rev else "")
+    )
+
+    if info.source == "git" and info.latest_rev:
+        available_lbl = "Available" if en else "Доступно"
+        if info.commits:
+            lines.append(
+                f"• {available_lbl}: rev <code>{escape(info.latest_rev)}</code> · "
+                f"{len(info.commits)} " + ("commits" if en else "коммитов")
+            )
+        else:
+            lines.append(f"• {available_lbl}: rev <code>{escape(info.latest_rev)}</code>")
+        if info.commits:
+            lines.append("")
+            for commit in info.commits[:5]:
+                lines.append(f"    <code>{escape(commit[:88])}</code>")
+    elif info.latest_version:
+        published = f" ({escape(info.published_at)})" if info.published_at else ""
+        lines.append(
+            f"• {'Latest release' if en else 'Последний релиз'}: "
+            f"<code>v{escape(info.latest_version)}</code>{published}"
+        )
+        if info.release_url:
+            lines.append(f"• <a href=\"{escape(info.release_url)}\">"
+                         f"{'Release notes on GitHub' if en else 'Что нового на GitHub'}</a>")
+
+    note = ""
+    if info.available:
+        note = (
+            "\n\nОбновление выполнит <code>install.sh --self-update</code> "
+            "(git pull, переустановка зависимостей, перезапуск сервиса)."
+            if not en
+            else "\n\nThe update runs <code>install.sh --self-update</code> "
+            "(git pull, dependency refresh, service restart)."
+        )
+    else:
+        note = (
+            "\n\n<i>Проверка идёт по ветке "
+            f"<code>{escape(config.update_branch)}</code> и релизам "
+            f"<code>{escape(config.update_repo)}</code>.</i>"
+            if not en
+            else f"\n\n<i>Checked against branch <code>{escape(config.update_branch)}</code> "
+            f"and releases of <code>{escape(config.update_repo)}</code>.</i>"
+        )
+    return "\n".join(lines) + note
+
+
+def _manual_update_text(lang: str, plan: UpdatePlan) -> str:
+    en = lang == "en"
+    if plan.reason == "dependencies":
+        return (
+            "⚙️ <b>Manual step required.</b>\n\n"
+            "The new revision changes <code>requirements.txt</code> / "
+            "<code>pyproject.toml</code>, so dependencies must be reinstalled by root:\n\n"
+            "<code>sudo /opt/mivta/install.sh --self-update</code>"
+            if en
+            else "⚙️ <b>Нужен ручной шаг.</b>\n\n"
+            "В новой ревизии изменились <code>requirements.txt</code> / "
+            "<code>pyproject.toml</code>, поэтому зависимости должен переустановить root:\n\n"
+            "<code>sudo /opt/mivta/install.sh --self-update</code>"
+        )
+    return (
+        "⚙️ <b>Automatic update is not available here.</b>\n\n"
+        "Run on the server:\n<code>sudo /opt/mivta/install.sh --self-update</code>\n\n"
+        "For Docker/other setups set <code>MIVTA_UPDATE_CMD</code> "
+        "(for example <code>docker compose pull &amp;&amp; docker compose up -d</code>)."
+        if en
+        else "⚙️ <b>Автообновление в этой установке недоступно.</b>\n\n"
+        "Выполните на сервере:\n<code>sudo /opt/mivta/install.sh --self-update</code>\n\n"
+        "Для Docker и других схем задайте <code>MIVTA_UPDATE_CMD</code> "
+        "(например <code>docker compose pull &amp;&amp; docker compose up -d</code>)."
+    )
+
+
+async def cmd_update(
+    message: Message,
+    db: Database,
+    config: Config,
+    restart: RestartController | None = None,
+) -> None:
+    """Owner-only `/update`: check for a newer revision and offer to apply it."""
+    if message.from_user is None:
+        return
+    uid = message.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(message.from_user, settings, config)
+
+    if not config.owner_ids:
+        await message.answer(
+            _owner_setup_hint_html(lang, uid, "/update"),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if uid not in config.owner_ids:
+        await message.answer(_owner_denied_text(lang))
+        return
+    if not config.self_update:
+        await message.answer(
+            "Updates from Telegram are disabled (SELF_UPDATE=false)."
+            if lang == "en"
+            else "Обновление из Telegram отключено (SELF_UPDATE=false)."
+        )
+        return
+
+    info = await check_update(config)
+    await message.answer(
+        _render_update_html(lang, info, config),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_build_service_keyboard(lang, update_available=info.available),
+    )
+
+
+async def cmd_restart(
+    message: Message,
+    db: Database,
+    config: Config,
+    restart: RestartController | None = None,
+) -> None:
+    """Owner-only `/restart`: ask for confirmation before bouncing the service."""
+    if message.from_user is None:
+        return
+    uid = message.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(message.from_user, settings, config)
+
+    if not config.owner_ids:
+        await message.answer(
+            _owner_setup_hint_html(lang, uid, "/restart"),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if uid not in config.owner_ids:
+        await message.answer(_owner_denied_text(lang))
+        return
+    if not config.self_restart:
+        await message.answer(
+            "Restarts from Telegram are disabled (SELF_RESTART=false)."
+            if lang == "en"
+            else "Перезапуск из Telegram отключён (SELF_RESTART=false)."
+        )
+        return
+    if restart is None:
+        await message.answer(
+            "Restart is not available in this runtime."
+            if lang == "en"
+            else "Перезапуск недоступен в этом режиме запуска."
+        )
+        return
+
+    text = (
+        "🔄 <b>Restart the bot?</b>\n\n"
+        f"The process will be replaced with a fresh <code>v{escape(__version__)}</code> "
+        "in a couple of seconds. In-flight translations may be lost."
+        if lang == "en"
+        else "🔄 <b>Перезапустить бота?</b>\n\n"
+        f"Процесс будет поднят заново на <code>v{escape(__version__)}</code> "
+        "через пару секунд. Переводы, выполняемые прямо сейчас, могут не дождаться ответа."
+    )
+    await message.answer(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=_build_service_keyboard(lang, update_available=False, confirm_restart=True),
+    )
+
+
+async def handle_owner_service_callback(
+    callback: CallbackQuery,
+    db: Database,
+    config: Config,
+    restart: RestartController | None = None,
+) -> None:
+    """Owner-only `/update` & `/restart` actions (`svc:update`, `svc:restart`, ...)."""
+    uid = callback.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(callback.from_user, settings, config)
+
+    if not config.owner_ids or uid not in config.owner_ids:
+        await callback.answer(
+            "Owner only." if lang == "en" else "Доступно только владельцу бота.",
+            show_alert=True,
+        )
+        return
+
+    action = (callback.data or "").partition(":")[2]
+    message = callback.message if isinstance(callback.message, Message) else None
+
+    if action == "cancel":
+        if message is not None:
+            with contextlib.suppress(TelegramBadRequest):
+                await message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ok" if lang == "en" else "Ок")
+        return
+
+    if action == "check":
+        if message is None:
+            await callback.answer()
+            return
+        info = await check_update(config)
+        await _edit_service_message(
+            message,
+            _render_update_html(lang, info, config),
+            reply_markup=_build_service_keyboard(lang, update_available=info.available),
+        )
+        await callback.answer("Updated" if lang == "en" else "Обновил информацию")
+        return
+
+    if action == "restart":
+        if not config.self_restart or restart is None or message is None:
+            await callback.answer(
+                "Restart is unavailable." if lang == "en" else "Перезапуск недоступен.",
+                show_alert=True,
+            )
+            return
+        marker = ServiceMarker(
+            action="restart",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            from_version=__version__,
+            requested_at=time.time(),
+        )
+        write_marker(config, marker)
+        await _edit_service_message(
+            message,
+            "⏳ Restarting the service…"
+            if lang == "en"
+            else "⏳ Перезапускаю сервис…",
+        )
+        await callback.answer()
+        restart.request(marker)
+        return
+
+    if action == "update":
+        if not config.self_update or message is None:
+            await callback.answer(
+                "Updates are disabled." if lang == "en" else "Обновления отключены.",
+                show_alert=True,
+            )
+            return
+        plan = await plan_update(config)
+        marker = ServiceMarker(
+            action="update",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            from_version=__version__,
+            requested_at=time.time(),
+        )
+        if plan.method == "manual":
+            await _edit_service_message(message, _manual_update_text(lang, plan))
+            await callback.answer()
+            return
+        if plan.method == "command":
+            write_marker(config, marker)
+            run_detached(config.update_cmd)
+            await _edit_service_message(
+                message,
+                (
+                    "⏳ Update command started:\n"
+                    f"<code>{escape(' '.join(config.update_cmd))}</code>"
+                    if lang == "en"
+                    else "⏳ Команда обновления запущена:\n"
+                    f"<code>{escape(' '.join(config.update_cmd))}</code>"
+                ),
+            )
+            await callback.answer()
+            return
+        if plan.method == "trigger":
+            write_marker(config, marker)
+            trigger = write_update_trigger(config)
+            if trigger is None:
+                await callback.answer(
+                    "Cannot request an update: data directory is not writable."
+                    if lang == "en"
+                    else "Не могу запросить обновление: каталог данных недоступен для записи.",
+                    show_alert=True,
+                )
+                return
+            await _edit_service_message(
+                message,
+                (
+                    "⏳ Update requested from systemd.\n\n"
+                    "The service pulls the new revision and restarts within a minute or two; "
+                    "I'll report back in this message as soon as I'm online again."
+                    if lang == "en"
+                    else "⏳ Запрос на обновление передан в systemd.\n\n"
+                    "Сервис подтянет новую ревизию и перезапустится в течение минуты-двух; "
+                    "я напишу в этом сообщении, как только снова буду в сети."
+                ),
+            )
+            await callback.answer()
+            return
+        if plan.method == "self":
+            result = await apply_self_update(config)
+            if not result.ok:
+                await _edit_service_message(
+                    message,
+                    (
+                        "❌ <b>Self-update failed.</b>\n"
+                        f"<code>{escape(result.detail[:200])}</code>\n\n"
+                        "Run manually:\n<code>sudo /opt/mivta/install.sh --self-update</code>"
+                        if lang == "en"
+                        else "❌ <b>Не удалось обновить код.</b>\n"
+                        f"<code>{escape(result.detail[:200])}</code>\n\n"
+                        "Запустите вручную:\n"
+                        "<code>sudo /opt/mivta/install.sh --self-update</code>"
+                    ),
+                )
+                await callback.answer()
+                return
+            if restart is None:
+                await _edit_service_message(
+                    message,
+                    (
+                        "✅ Code updated — restart the service to apply it."
+                        if lang == "en"
+                        else "✅ Код обновлён — перезапустите сервис, чтобы применить."
+                    ),
+                )
+                await callback.answer()
+                return
+            write_marker(config, marker)
+            await _edit_service_message(
+                message,
+                "⏳ Code updated — restarting…"
+                if lang == "en"
+                else "⏳ Код обновлён — перезапускаюсь…",
+            )
+            await callback.answer()
+            restart.request(marker)
+            return
+
+    await callback.answer()
+
+
 def build_commands_router() -> Router:
     """Create a fresh Router bound to command and settings callback handlers."""
     router = Router(name="commands")
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_settings, Command("help", "settings"))
     router.message.register(cmd_status, Command("status"), F.chat.type == "private")
+    router.message.register(cmd_update, Command("update", "upgrade"), F.chat.type == "private")
+    router.message.register(cmd_restart, Command("restart"), F.chat.type == "private")
     router.message.register(cmd_lang, Command("lang"))
     router.message.register(cmd_swap, Command("swap"))
     router.message.register(cmd_langs, Command("langs"))
@@ -1534,5 +1984,6 @@ def build_commands_router() -> Router:
     router.message.register(cmd_reset, Command("reset"))
     router.callback_query.register(handle_settings_callback, F.data.startswith("cfg:"))
     router.callback_query.register(handle_owner_status_callback, F.data.startswith("ost:"))
+    router.callback_query.register(handle_owner_service_callback, F.data.startswith("svc:"))
     router.message.register(reject_direct_messages, F.chat.type == "private")
     return router

@@ -236,10 +236,16 @@ def test_install_sh_auto_update_timer_units_and_rollback_safe_self_update(tmp_pa
 
     timer_file = systemd_dir / "mivta-update.timer"
     upd_svc_file = systemd_dir / "mivta-update.service"
+    upd_path_file = systemd_dir / "mivta-update.path"
     assert timer_file.is_file()
     assert upd_svc_file.is_file()
+    assert upd_path_file.is_file()
     assert "OnCalendar=*-*-* 06:00:00" in timer_file.read_text(encoding="utf-8")
     assert "--self-update" in upd_svc_file.read_text(encoding="utf-8")
+    # The privileged watcher turns a marker dropped by the bot into a real update
+    path_unit = upd_path_file.read_text(encoding="utf-8")
+    assert f"PathExistsGlob={target_dir}/data/.update-request-*" in path_unit
+    assert "Unit=mivta-update.service" in path_unit
 
     self_upd_cmd = [
         "bash",
@@ -288,7 +294,8 @@ def test_install_sh_auto_update_timer_units_and_rollback_safe_self_update(tmp_pa
     ).stdout.strip()
     assert current_rev == good_rev
 
-    # 6. --no-auto-update removes the timer & update service units cleanly
+    # 6. --no-auto-update removes only the timer: the oneshot unit stays because the
+    #    on-demand `/update` trigger (mivta-update.path) needs it
     disable_res = subprocess.run(
         [
             "bash",
@@ -308,7 +315,40 @@ def test_install_sh_auto_update_timer_units_and_rollback_safe_self_update(tmp_pa
     )
     assert disable_res.returncode == 0, disable_res.stderr
     assert not timer_file.exists()
-    assert not upd_svc_file.exists()
+    assert upd_svc_file.is_file()
+    assert upd_path_file.is_file()
+
+    # 7. --no-remote-update drops the on-demand trigger (and the service unit with it
+    #    stays available for the timer / manual `--self-update`)
+    disable_remote = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_SH),
+            "--no-systemd",
+            "--non-interactive",
+            "--no-remote-update",
+            "--from-local",
+            str(REPO_ROOT),
+            "--dir",
+            str(target_dir),
+        ],
+        env=env_with_systemd_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert disable_remote.returncode == 0, disable_remote.stderr
+    assert not upd_path_file.exists()
+    assert upd_svc_file.is_file()
+
+    # 8. --self-update consumes pending on-demand update markers from data/
+    data_dir = target_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    pending_marker = data_dir / ".update-request-1700000000-abcdef"
+    pending_marker.write_text("update requested\n", encoding="utf-8")
+    consume = subprocess.run(self_upd_cmd, capture_output=True, text=True, check=False)
+    assert consume.returncode == 0, consume.stderr
+    assert not pending_marker.exists()
 
 
 def test_install_sh_privilege_separation_permissions(tmp_path: Path) -> None:
