@@ -116,55 +116,268 @@ def _format_settings_text(
     )
 
 
-def _format_help_text(settings: UserSettings, bot_username: str, ui_lang: str) -> str:
-    """Full usage guide (kept out of /settings so the panel stays one screen tall)."""
+HELP_SECTIONS: tuple[str, ...] = (
+    "inline",
+    "automation",
+    "groups",
+    "filters",
+    "languages",
+    "commands",
+    "privacy",
+)
+
+
+def _help_intro(ui_lang: str) -> str:
     if ui_lang == "en":
         return (
-            "mivta — how to use\n\n"
-            "1. Inline Mode — any chat, group, or channel:\n"
-            f"• @{bot_username} Hello, how are you?\n"
-            f"• @{bot_username} >de text · en>pl text · !formal text\n\n"
-            "2. Chat Automation (1-on-1 DMs, no 'via @bot' label):\n"
-            "• Connect the bot in Telegram Settings → Chat Automation\n"
-            "• > Hello, how are you? (messages and media captions)\n"
-            "• >de text · ru>pl !formal text\n\n"
-            "3. Groups: add the bot as admin with 'Delete messages' and write '> text'.\n\n"
-            "Commands: /lang · /swap · /langs · /source · /style · /ui · /privacy · /reset"
+            "📖 mivta — how to use\n\n"
+            "A translator for the inline field, private chats and groups. "
+            "Tap a section button below to open just that part, "
+            "or read the whole guide at once."
+        )
+    return (
+        "📖 mivta — как пользоваться\n\n"
+        "Перевод в инлайн-режиме, в личных чатах и в группах. "
+        "Кнопки ниже открывают нужный раздел сразу, "
+        "«📖 Вся справка» показывает руководство целиком."
+    )
+
+
+def _help_section_text(section: str, bot_username: str, ui_lang: str) -> str:
+    """One section of the guide (with its own heading), in Russian or English."""
+    en = ui_lang == "en"
+
+    if section == "inline":
+        if en:
+            return (
+                "1 · 📱 Inline Mode\n"
+                "Works in any chat, group or channel — the bot does not have to be a member. "
+                f"Type @{bot_username} in the input field followed by your text; "
+                "the translation card appears right above the keyboard.\n"
+                f"• @{bot_username} Hello, how are you?\n"
+                f"• @{bot_username} >de Hello! — one-off target language\n"
+                f"• @{bot_username} ru>pl Good afternoon — explicit pair\n"
+                f"• @{bot_username} !formal Dear colleagues — one-off style\n"
+                "Extra card languages (/langs pl de): up to 3 cards at once."
+            )
+        return (
+            "1 · 📱 Инлайн-режим\n"
+            "Работает в любом чате, группе или канале — бот не должен быть участником. "
+            f"Наберите @{bot_username} в поле ввода и текст: "
+            "карточка с переводом появится прямо над клавиатурой.\n"
+            f"• @{bot_username} Привет, как дела?\n"
+            f"• @{bot_username} >de Привет, мир! — разовый язык\n"
+            f"• @{bot_username} ru>pl Добрый день — явная пара\n"
+            f"• @{bot_username} !formal Коллеги, добрый день — разовый стиль\n"
+            "Доп. языки карточек (/langs pl de) — до 3 карточек за раз."
         )
 
+    if section == "automation":
+        if en:
+            return (
+                "2 · 💬 Chat Automation\n"
+                "1-on-1 private chats, translated in place with no 'via @bot' label. "
+                "Connect the bot in Settings → Chat Automation (Secretary Mode in "
+                "@BotFather) and grant the 'Reply to messages' right.\n"
+                "Start a message or a media caption with >:\n"
+                "• > Hello, how are you?\n"
+                "• >pl !casual I'll be there in 10 minutes\n"
+                "Without > the message is left alone. Long texts (over 500 characters) "
+                "are split into parts, translated one by one and stitched back together "
+                "— up to the full 4096-character Telegram limit."
+            )
+        return (
+            "2 · 💬 Автоматизация чатов\n"
+            "Личные чаты 1-на-1: перевод на месте, без метки «via @bot». "
+            "Подключите бота в «Настройки → Автоматизация чатов» "
+            "(в @BotFather — Secretary Mode) и дайте право «Ответы на сообщения».\n"
+            "Начинайте сообщение или подпись с >:\n"
+            "• > Привет, как дела?\n"
+            "• >pl !casual Буду через 10 минут\n"
+            "Без > сообщение остаётся как есть. Длинные тексты (больше 500 символов) "
+            "переводятся по частям и склеиваются обратно — до 4096 символов."
+        )
+
+    if section == "groups":
+        if en:
+            return (
+                "3 · 👥 Groups\n"
+                "Add the bot to a group as an admin with the 'Delete messages' right. "
+                "Members write > text (or a > text caption) — mivta posts the translation "
+                "with the author's name and deletes the draft; forum topics are kept.\n"
+                "Pause, language, ⇄ auto-swap and style live in /settings; the ignore list "
+                "in /ignore, /unignore and /ignored. All of it is admins-only, and long "
+                "messages are translated in parts up to 4096 characters."
+            )
+        return (
+            "3 · 👥 Группы\n"
+            "Добавьте бота в группу админом с правом «Удаление сообщений». "
+            "Участники пишут > текст (или подпись > текст) — бот публикует перевод "
+            "с именем автора и удаляет черновик; темы-форумы сохраняются.\n"
+            "Пауза, язык, ⇄ авто-смена и стиль — в /settings, игнор-лист — "
+            "/ignore, /unignore, /ignored. Всё это только для администраторов; "
+            "длинные сообщения переводятся по частям, до 4096 символов."
+        )
+
+    if section == "filters":
+        if en:
+            return (
+                "4 · ⚡️ Quick filters\n"
+                "Override your saved settings for one message, right in the text:\n"
+                "• >de — target language after the arrow;\n"
+                "• ru>pl — explicit pair «from>to»;\n"
+                "• !neutral · !casual · !formal — style;\n"
+                "• combined: >de !formal Text.\n"
+                "Filters work the same in Inline Mode, in chats and in groups."
+            )
+        return (
+            "4 · ⚡️ Быстрые фильтры\n"
+            "Разово переопределяют настройки прямо в тексте:\n"
+            "• >de — целевой язык после стрелочки;\n"
+            "• ru>pl — явная пара «откуда>куда»;\n"
+            "• !neutral · !casual · !formal — стиль;\n"
+            "• можно вместе: >de !formal Текст.\n"
+            "Фильтры работают и в инлайн-режиме, и в чатах, и в группах."
+        )
+
+    if section == "languages":
+        if en:
+            return (
+                "5 · 🌍 Languages and ⇄ auto-swap\n"
+                "• /lang en — default target language;\n"
+                "• /swap ru — paired language: RU→EN and EN→RU on their own;\n"
+                "• /source auto — detect the source language (or /source ru);\n"
+                "• /style formal — default register: neutral · casual · formal;\n"
+                "• /langs pl de — extra card languages (up to 3);\n"
+                "• /ui ru|en|auto — language of the bot's own menus.\n"
+                "All of it is also one tap away in /settings."
+            )
+        return (
+            "5 · 🌍 Языки и ⇄ авто-смена\n"
+            "• /lang en — основной язык перевода;\n"
+            "• /swap ru — парный язык: RU→EN и EN→RU сами, переключать не нужно;\n"
+            "• /source auto — автоопределение исходного языка (или /source ru);\n"
+            "• /style formal — регистр по умолчанию: neutral · casual · formal;\n"
+            "• /langs pl de — доп. языки карточек (до 3);\n"
+            "• /ui ru|en|auto — язык интерфейса самого бота.\n"
+            "Всё это есть кнопками в /settings."
+        )
+
+    if section == "commands":
+        if en:
+            return (
+                "6 · ⌨️ Commands\n"
+                "• /settings — settings panel;\n"
+                "• /help — this guide;\n"
+                "• /lang · /swap · /langs · /source · /style · /ui;\n"
+                "• /privacy — what mivta stores; /reset — delete my settings.\n"
+                "In groups (admins only): /settings · /grouplang · /groupswap · "
+                "/groupstyle · /grouppause · /ignore · /unignore · /ignored."
+            )
+        return (
+            "6 · ⌨️ Команды\n"
+            "• /settings — панель настроек;\n"
+            "• /help — эта справка;\n"
+            "• /lang · /swap · /langs · /source · /style · /ui;\n"
+            "• /privacy — что мы храним; /reset — удалить мои настройки.\n"
+            "В группе (только админы): /settings · /grouplang · /groupswap · "
+            "/groupstyle · /grouppause · /ignore · /unignore · /ignored."
+        )
+
+    # privacy
+    if en:
+        return (
+            "7 · 🔒 Privacy\n"
+            "Message texts, inline queries and translations are never stored — not on "
+            "disk, not in logs. SQLite keeps only numeric user_id / chat_id, language "
+            "and style codes, ignore-list IDs and mode flags. Translations live in a "
+            "RAM cache and vanish on restart. Full text: /privacy."
+        )
     return (
-        "mivta — как пользоваться\n\n"
-        "1. Инлайн-режим — любой чат, группа или канал:\n"
-        f"• @{bot_username} Привет, как дела?\n"
-        f"• @{bot_username} >de текст · ru>pl текст · !formal текст\n\n"
-        "2. Автоматизация чатов (личка 1-на-1, без метки via @bot):\n"
-        "• Подключите бота в «Настройки → Автоматизация чатов» (Secretary Mode)\n"
-        "• > Привет, как дела? (сообщения и подписи к фото/файлам)\n"
-        "• >de текст · ru>pl !formal текст\n\n"
-        "3. Группы: добавьте бота админом с правом «Удаление сообщений» и пишите «> текст».\n\n"
-        "Команды: /lang · /swap · /langs · /source · /style · /ui · /privacy · /reset"
+        "7 · 🔒 Приватность\n"
+        "Тексты сообщений, inline-запросы и переводы не сохраняются — ни на диске, "
+        "ни в логах. В SQLite лежат только числовой user_id/chat_id, коды языков и "
+        "стиля, ID в игнор-листе и флаги режима. Переводы живут в RAM-кэше и "
+        "исчезают при перезапуске. Полный текст — /privacy."
     )
 
 
-def _help_keyboard(*, ui_lang: str) -> InlineKeyboardMarkup:
-    """Back-to-settings + jump straight into the inline input field."""
+def _format_help_text(
+    settings: UserSettings,
+    bot_username: str,
+    ui_lang: str,
+    *,
+    section: str = "all",
+) -> str:
+    """Full usage guide (kept out of /settings so the panel stays one screen tall)."""
+    intro = _help_intro(ui_lang)
+    if section in HELP_SECTIONS:
+        hint = (
+            "\n\nOther sections are one tap away on the buttons below."
+            if ui_lang == "en"
+            else "\n\nОстальные разделы — на кнопках ниже."
+        )
+        return f"{intro}\n\n{_help_section_text(section, bot_username, ui_lang)}{hint}"
+
+    body = "\n\n".join(
+        _help_section_text(name, bot_username, ui_lang) for name in HELP_SECTIONS
+    )
+    return f"{intro}\n\n{body}"
+
+
+def _help_section_label(section: str, ui_lang: str) -> str:
+    if ui_lang == "en":
+        return {
+            "inline": "📱 Inline Mode",
+            "automation": "💬 Chat Automation",
+            "groups": "👥 Groups",
+            "filters": "⚡️ Filters",
+            "languages": "🌍 Languages",
+            "commands": "⌨️ Commands",
+            "privacy": "🔒 Privacy",
+            "all": "📖 Full guide",
+        }[section]
+    return {
+        "inline": "📱 Инлайн-режим",
+        "automation": "💬 Автоматизация",
+        "groups": "👥 Группы",
+        "filters": "⚡️ Фильтры",
+        "languages": "🌍 Языки",
+        "commands": "⌨️ Команды",
+        "privacy": "🔒 Приватность",
+        "all": "📖 Вся справка",
+    }[section]
+
+
+def _help_keyboard(*, ui_lang: str, section: str = "all") -> InlineKeyboardMarkup:
+    """Section jumps + back-to-settings + a jump into the inline input field."""
     is_en = ui_lang == "en"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="◂ Settings" if is_en else "◂ Настройки",
-                    callback_data="cfg:main",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Translate in chat ▸" if is_en else "Перевести в чате ▸",
-                    switch_inline_query="",
-                )
-            ],
-        ]
-    )
+
+    def section_button(name: str) -> InlineKeyboardButton:
+        label = _help_section_label(name, ui_lang)
+        if name == section:
+            label = f"▸ {label}"
+        return InlineKeyboardButton(text=label, callback_data=f"hlp:{name}")
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [section_button("inline"), section_button("automation")],
+        [section_button("groups"), section_button("filters")],
+        [section_button("languages"), section_button("commands")],
+        [section_button("privacy"), section_button("all")],
+        [
+            InlineKeyboardButton(
+                text="◂ Settings" if is_en else "◂ Настройки",
+                callback_data="cfg:main",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Translate in chat ▸" if is_en else "Перевести в чате ▸",
+                switch_inline_query="",
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _format_privacy_text(ui_lang: str) -> str:
@@ -591,6 +804,30 @@ async def cmd_help(
         _format_help_text(settings, bot_username, ui),
         reply_markup=_help_keyboard(ui_lang=ui),
     )
+
+
+async def handle_help_callback(
+    callback: CallbackQuery,
+    config: Config,
+    db: Database,
+    bot_username: str = "BotUsername",
+) -> None:
+    """`hlp:<section>` — open one section of the guide (`hlp:all` = the whole guide)."""
+    if callback.data is None:
+        await callback.answer()
+        return
+    section = callback.data.split(":", 1)[1].strip()
+    if section not in HELP_SECTIONS:
+        section = "all"
+
+    settings = await db.get_user_settings(callback.from_user.id)
+    ui = _ui_for(callback.from_user, settings, config)
+    await _edit_safely(
+        callback,
+        _format_help_text(settings, bot_username, ui, section=section),
+        _help_keyboard(ui_lang=ui, section=section),
+    )
+    await callback.answer()
 
 
 async def cmd_lang(
@@ -2275,6 +2512,7 @@ def build_commands_router() -> Router:
     router.message.register(cmd_privacy, Command("privacy"))
     router.message.register(cmd_reset, Command("reset"))
     router.callback_query.register(handle_settings_callback, F.data.startswith("cfg:"))
+    router.callback_query.register(handle_help_callback, F.data.startswith("hlp:"))
     router.callback_query.register(handle_owner_status_callback, F.data.startswith("ost:"))
     router.callback_query.register(handle_owner_service_callback, F.data.startswith("svc:"))
     router.message.register(reject_direct_messages, F.chat.type == "private")
