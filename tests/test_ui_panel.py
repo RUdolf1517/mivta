@@ -168,6 +168,88 @@ async def test_settings_panel_is_one_screen_and_help_is_separate(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_help_guide_has_sections_with_jump_buttons(tmp_path: Path) -> None:
+    """`/help` shows the whole guide; `hlp:*` opens one section in the same message."""
+    from mivta.handlers.commands import HELP_SECTIONS
+
+    db = Database(tmp_path / "help.db")
+    await db.connect()
+    try:
+        cfg = Config(bot_token="123456:ABCDEF", default_ui_lang="ru")
+        dp = create_dispatcher(
+            config=cfg,
+            db=db,
+            translator=StubTranslator(),
+            bot_username="mivtabot",
+        )
+        bot = CapturingBot()
+
+        # 1. /help: every section heading is present and fits into one Telegram message
+        await dp.feed_update(bot, _msg_update(1, user_id=555, text="/help"))
+        guide = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "📖 mivta — как пользоваться" in guide.text
+        headings = [
+            "1 · 📱 Инлайн-режим",
+            "2 · 💬 Автоматизация чатов",
+            "3 · 👥 Группы",
+            "4 · ⚡️ Быстрые фильтры",
+            "5 · 🌍 Языки и ⇄ авто-смена",
+            "6 · ⌨️ Команды",
+            "7 · 🔒 Приватность",
+        ]
+        for heading in headings:
+            assert heading in guide.text, heading
+        assert len(guide.text) < 4096
+        rows = _button_rows(guide.reply_markup)
+        for name in HELP_SECTIONS:
+            assert f"hlp:{name}" in rows
+        assert "hlp:all" in rows
+        assert "cfg:main" in rows
+
+        # 2. A section button rewrites the same message with only that section
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(2, user_id=555, data="hlp:groups"))
+        section = [c for c in bot.calls if isinstance(c, EditMessageText)][-1]
+        assert "3 · 👥 Группы" in section.text
+        assert "1 · 📱 Инлайн-режим" not in section.text
+        assert "Удаление сообщений" in section.text
+        # The opened section is marked and the other jumps are still there
+        labels = [
+            btn.text
+            for row in section.reply_markup.inline_keyboard
+            for btn in row
+        ]
+        assert "▸ 👥 Группы" in labels
+        assert "hlp:all" in _button_rows(section.reply_markup)
+
+        # 3. «📖 Вся справка» brings the full guide back
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(3, user_id=555, data="hlp:all"))
+        full = [c for c in bot.calls if isinstance(c, EditMessageText)][-1]
+        for heading in headings:
+            assert heading in full.text
+
+        # 4. An unknown section falls back to the whole guide instead of breaking
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(4, user_id=555, data="hlp:no-such-part"))
+        fallback = [c for c in bot.calls if isinstance(c, EditMessageText)][-1]
+        assert "1 · 📱 Инлайн-режим" in fallback.text
+
+        # 5. English interface gets the English guide
+        bot.calls.clear()
+        await dp.feed_update(
+            bot,
+            _msg_update(5, user_id=556, text="/help", lang_code="en"),
+        )
+        en_guide = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "📖 mivta — how to use" in en_guide.text
+        assert "1 · 📱 Inline Mode" in en_guide.text
+        assert "7 · 🔒 Privacy" in en_guide.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_logs_command_is_wired_into_the_dispatcher(tmp_path: Path) -> None:
     """`/logs` reaches the handler through workflow data, including its tail buffer."""
     from mivta.utils.logtail import LogTail
