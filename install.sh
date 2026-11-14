@@ -24,6 +24,7 @@ NONINTERACTIVE="${MIVTA_NONINTERACTIVE:-0}"
 NO_SYSTEMD="${MIVTA_NO_SYSTEMD:-0}"
 AUTO_UPDATE="${MIVTA_AUTO_UPDATE:-1}"
 AUTO_UPDATE_TIME="${MIVTA_AUTO_UPDATE_TIME:-06:00}"
+REMOTE_UPDATE="${MIVTA_REMOTE_UPDATE:-1}"
 ACTION="install"
 PURGE=0
 
@@ -76,6 +77,7 @@ Options:
   --from-local [DIR]       Install from local checkout instead of cloning GitHub
   --auto-update-time <T>   Daily auto-update & restart time (default: 06:00)
   --no-auto-update         Disable daily systemd auto-update & restart timer
+  --no-remote-update       Disable the on-demand update trigger used by /update
   --self-update            Pull latest code (with rollback safety) and restart service
   --non-interactive        Never prompt on /dev/tty
   --no-systemd             Skip creating/managing systemd service (e.g. containers)
@@ -88,7 +90,7 @@ Environment variables:
   TRANSLATOR_MODEL, TRANSLATOR_FALLBACK_PROVIDER, TRANSLATOR_GLOSSARY,
   DEFAULT_TARGET_LANG, DEFAULT_SOURCE_LANG, DEFAULT_STYLE,
   INLINE_EXTRA_LANGS, INLINE_STYLE_VARIANTS,
-  MIVTA_AUTO_UPDATE=1|0, MIVTA_AUTO_UPDATE_TIME=06:00,
+  MIVTA_AUTO_UPDATE=1|0, MIVTA_AUTO_UPDATE_TIME=06:00, MIVTA_REMOTE_UPDATE=1|0,
   MIVTA_INSTALL_DIR, MIVTA_USER, MIVTA_REPO, MIVTA_BRANCH, MIVTA_NONINTERACTIVE=1
 EOF
 }
@@ -172,6 +174,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-auto-update)
       AUTO_UPDATE=0
+      shift
+      ;;
+    --no-remote-update)
+      REMOTE_UPDATE=0
       shift
       ;;
     --self-update)
@@ -418,6 +424,9 @@ do_self_update() {
   [ -d "$INSTALL_DIR" ] || err "install directory $INSTALL_DIR does not exist"
   [ -x "$INSTALL_DIR/.venv/bin/python" ] || err "virtualenv missing in $INSTALL_DIR/.venv"
 
+  # Consume on-demand update requests dropped by the bot (`/update` in Telegram)
+  rm -f "$INSTALL_DIR"/data/.update-request-* 2>/dev/null || true
+
   local old_rev=""
   local new_rev=""
   local updated_code=0
@@ -495,11 +504,12 @@ do_uninstall() {
   local unit_path="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
   local upd_service_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.service"
   local upd_timer_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.timer"
+  local upd_path_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.path"
 
   if [ "$NO_SYSTEMD" != "1" ]; then
     is_root || err "--uninstall requires root privileges (run with sudo)"
     if [ -d /run/systemd/system ] && need systemctl; then
-      for unit in "${SERVICE_NAME}-update.timer" "${SERVICE_NAME}-update.service" "${SERVICE_NAME}.service"; do
+      for unit in "${SERVICE_NAME}-update.path" "${SERVICE_NAME}-update.timer" "${SERVICE_NAME}-update.service" "${SERVICE_NAME}.service"; do
         if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
           say "Stopping and disabling ${unit}..."
           systemctl stop "$unit" 2>/dev/null || true
@@ -508,7 +518,7 @@ do_uninstall() {
       done
     fi
     local removed_any=0
-    for f in "$upd_timer_path" "$upd_service_path" "$unit_path"; do
+    for f in "$upd_path_path" "$upd_timer_path" "$upd_service_path" "$unit_path"; do
       if [ -f "$f" ]; then
         rm -f "$f"
         say "Removed $f"
@@ -648,23 +658,10 @@ configure_env_file() {
   chmod 0600 "$env_file"
 }
 
-configure_auto_update_units() {
-  local on_calendar="$1"
+write_update_service_unit() {
   local upd_service_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.service"
-  local upd_timer_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.timer"
   mkdir -p "$SYSTEMD_DIR"
-
-  if [ "$AUTO_UPDATE" != "1" ]; then
-    if [ "$NO_SYSTEMD" != "1" ] && [ -d /run/systemd/system ] && need systemctl; then
-      systemctl stop "${SERVICE_NAME}-update.timer" 2>/dev/null || true
-      systemctl disable "${SERVICE_NAME}-update.timer" 2>/dev/null || true
-    fi
-    rm -f "$upd_timer_path" "$upd_service_path"
-    say "Auto-update timer disabled (--no-auto-update)."
-    return 0
-  fi
-
-  say "Writing auto-update & restart units (${on_calendar})..."
+  say "Writing update unit $upd_service_path..."
   cat > "$upd_service_path" <<EOF
 [Unit]
 Description=Update and restart ${SERVICE_NAME} Telegram Translator
@@ -681,7 +678,58 @@ ExecStart=${INSTALL_DIR}/install.sh --self-update --dir ${INSTALL_DIR}
 TimeoutStartSec=300
 EOF
   chmod 0644 "$upd_service_path"
+}
 
+# On-demand updates requested from Telegram: the bot (running unprivileged) can only
+# drop a marker into ${INSTALL_DIR}/data, and this root-owned watcher runs the update.
+write_update_path_unit() {
+  local upd_path_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.path"
+  mkdir -p "$SYSTEMD_DIR"
+  say "Writing on-demand update trigger $upd_path_path..."
+  cat > "$upd_path_path" <<EOF
+[Unit]
+Description=On-demand update trigger for ${SERVICE_NAME} (Telegram /update)
+
+[Path]
+PathExistsGlob=${INSTALL_DIR}/data/.update-request-*
+Unit=${SERVICE_NAME}-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$upd_path_path"
+}
+
+configure_auto_update_units() {
+  local on_calendar="$1"
+  local upd_path_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.path"
+  local upd_timer_path="${SYSTEMD_DIR}/${SERVICE_NAME}-update.timer"
+  mkdir -p "$SYSTEMD_DIR"
+
+  write_update_service_unit
+
+  if [ "$REMOTE_UPDATE" = "1" ]; then
+    write_update_path_unit
+  else
+    if [ "$NO_SYSTEMD" != "1" ] && [ -d /run/systemd/system ] && need systemctl; then
+      systemctl stop "${SERVICE_NAME}-update.path" 2>/dev/null || true
+      systemctl disable "${SERVICE_NAME}-update.path" 2>/dev/null || true
+    fi
+    rm -f "$upd_path_path"
+    say "On-demand update trigger disabled (--no-remote-update)."
+  fi
+
+  if [ "$AUTO_UPDATE" != "1" ]; then
+    if [ "$NO_SYSTEMD" != "1" ] && [ -d /run/systemd/system ] && need systemctl; then
+      systemctl stop "${SERVICE_NAME}-update.timer" 2>/dev/null || true
+      systemctl disable "${SERVICE_NAME}-update.timer" 2>/dev/null || true
+    fi
+    rm -f "$upd_timer_path"
+    say "Auto-update timer disabled (--no-auto-update)."
+    return 0
+  fi
+
+  say "Writing auto-update & restart timer (${on_calendar})..."
   cat > "$upd_timer_path" <<EOF
 [Unit]
 Description=Daily auto-update and scheduled restart timer for ${SERVICE_NAME}
@@ -715,6 +763,10 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=${INSTALL_DIR}/.env
+Environment=MIVTA_INSTALL_DIR=${INSTALL_DIR}
+Environment=MIVTA_SERVICE_NAME=${SERVICE_NAME}
+Environment=MIVTA_BRANCH=${BRANCH}
+Environment=MIVTA_REPO=${REPO}
 ExecStart=${INSTALL_DIR}/.venv/bin/python -m mivta
 Restart=on-failure
 RestartSec=5
@@ -740,6 +792,10 @@ EOF
 
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}.service" >/dev/null
+  if [ "$REMOTE_UPDATE" = "1" ]; then
+    systemctl enable --now "${SERVICE_NAME}-update.path" >/dev/null
+    say "Enabled ${SERVICE_NAME}-update.path (on-demand /update from Telegram)."
+  fi
   if [ "$AUTO_UPDATE" = "1" ]; then
     systemctl enable --now "${SERVICE_NAME}-update.timer" >/dev/null
     local tz_name

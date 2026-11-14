@@ -77,6 +77,8 @@
 | `/ui <ru\|en\|auto>` | Переключить язык меню и подсказок самого бота |
 | `/privacy`, `/reset` | Политика хранения данных и мгновенное удаление своих настроек из SQLite |
 | `/status` *(только `OWNER_ID`)* | Статус цепочки API, `cooldown`, аптайма, кэша и числа юзеров (для владельца бота) |
+| `/update` *(только `OWNER_ID`)* | Проверить новую версию и обновить бота с перезапуском прямо из Telegram |
+| `/restart` *(только `OWNER_ID`)* | Перезапустить сервис бота одной кнопкой |
 
 Команды администратора внутри группы (недоступны обычным участникам):
 
@@ -128,7 +130,7 @@
 
 ## Свой сервер
 
-Установка или обновление на Ubuntu / Debian одной командой (создаёт изолированный `.venv`, непривилегированного пользователя `mivta`, `systemd`-сервис и ежедневный таймер автообновления):
+Установка или обновление на Ubuntu / Debian одной командой (создаёт изолированный `.venv`, непривилегированного пользователя `mivta`, `systemd`-сервис, ежедневный таймер автообновления и триггер обновления по кнопке из Telegram):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | sudo bash
@@ -176,7 +178,7 @@ cp .env.example .env   # укажите BOT_TOKEN
 | [botfather](docs/botfather.md) | Создание своего бота в `@BotFather` и подключение Автоматизации чатов |
 | [providers](docs/providers.md) | Провайдеры перевода, LLM-пресеты, глоссарий, резерв и авто-разворот `⇄` |
 | [config](docs/config.md) | Все переменные `.env`, значения по умолчанию, лимиты и настройки Webhook |
-| [deployment](docs/deployment.md) | Флаги `install.sh`, разграничение прав, таймер автообновления, Webhook за Caddy/Nginx и Docker |
+| [deployment](docs/deployment.md) | Флаги `install.sh`, разграничение прав, таймер автообновления, `/update` и `/restart` из Telegram, Webhook за Caddy/Nginx и Docker |
 | [architecture](docs/architecture.md) | Модули проекта, поток обработки запроса и пересчёт UTF-16 сущностей |
 | [CONTRIBUTING](CONTRIBUTING.md) · [SECURITY](SECURITY.md) · [CHANGELOG](CHANGELOG.md) | Правила контрибуции, политика уязвимостей и история релизов |
 

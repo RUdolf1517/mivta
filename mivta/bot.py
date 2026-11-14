@@ -28,6 +28,7 @@ from mivta.config import Config, ConfigError
 from mivta.database import Database
 from mivta.handlers import build_root_router
 from mivta.handlers.pipeline import InflightEntry
+from mivta.service import RestartController, announce_pending_marker, perform_restart
 from mivta.translator import (
     Translator,
     create_http_client,
@@ -172,6 +173,7 @@ def create_dispatcher(
     cache: TranslationCache | None = None,
     rate_limiter: RateLimiter | None = None,
     metrics: RuntimeMetrics | None = None,
+    restart: RestartController | None = None,
     bot_username: str = "BotUsername",
 ) -> Dispatcher:
     """Wire routers and runtime dependencies into an aiogram Dispatcher."""
@@ -220,6 +222,8 @@ def create_dispatcher(
     dp["inline_active"] = inline_active
     dp["inline_seq"] = inline_seq
     dp["bot_username"] = bot_username
+    if restart is not None:
+        dp["restart"] = restart
     return dp
 
 
@@ -330,10 +334,14 @@ async def _register_localized_commands(
         owner_cmds_en = [
             *BOT_COMMANDS_EN,
             BotCommand(command="status", description="Server, API chain & user status"),
+            BotCommand(command="update", description="Check for updates & restart service"),
+            BotCommand(command="restart", description="Restart the bot service"),
         ]
         owner_cmds_ru = [
             *BOT_COMMANDS_RU,
             BotCommand(command="status", description="Статус сервера, API и аудитории"),
+            BotCommand(command="update", description="Проверить обновления и перезапустить"),
+            BotCommand(command="restart", description="Перезапустить сервис бота"),
         ]
         for oid in owner_ids:
             owner_scope = BotCommandScopeChat(chat_id=oid)
@@ -351,6 +359,7 @@ async def _run_webhook_server(
     dp: Dispatcher,
     bot: Bot,
     config: Config,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     effective_secret = config.webhook_secret_token or secrets.token_urlsafe(32)
     app = build_webhook_app(
@@ -377,7 +386,7 @@ async def _run_webhook_server(
             config.webhook_path,
         )
 
-        stop_event = asyncio.Event()
+        stop_event = asyncio.Event() if stop_event is None else stop_event
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):
@@ -423,6 +432,9 @@ async def run_bot(config: Config) -> None:
     )
     bot = Bot(token=config.bot_token)
     janitor_task: asyncio.Task[None] | None = None
+    restart = RestartController()
+    webhook_stop_event = asyncio.Event()
+    restart.bind_stop(webhook_stop_event.set)
 
     try:
         await db.connect()
@@ -440,6 +452,9 @@ async def run_bot(config: Config) -> None:
                 bot_username,
             )
 
+        # If the previous run was bounced by `/restart` or `/update`, report the outcome
+        await announce_pending_marker(bot, config)
+
         await _register_localized_commands(bot, owner_ids=config.owner_ids)
         if config.sync_bot_profile:
             await _register_localized_profile(bot, bot_username)
@@ -450,6 +465,7 @@ async def run_bot(config: Config) -> None:
             translator=translator,
             cache=cache,
             rate_limiter=rate_limiter,
+            restart=restart,
             bot_username=bot_username,
         )
 
@@ -471,8 +487,17 @@ async def run_bot(config: Config) -> None:
         )
 
         if config.webhook_url:
-            await _run_webhook_server(dp, bot, config)
+            await _run_webhook_server(dp, bot, config, stop_event=webhook_stop_event)
         else:
+
+            def _stop_polling() -> None:
+                async def _stop() -> None:
+                    with contextlib.suppress(RuntimeError):
+                        await dp.stop_polling()
+
+                asyncio.get_running_loop().create_task(_stop())
+
+            restart.bind_stop(_stop_polling)
             with contextlib.suppress(Exception):
                 await bot.delete_webhook(drop_pending_updates=False)
             await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
@@ -486,6 +511,15 @@ async def run_bot(config: Config) -> None:
         await http_client.aclose()
         await db.close()
         await bot.session.close()
+
+    pending = restart.take()
+    if pending is not None:
+        logger.info(
+            "owner requested %s from chat %s — restarting",
+            pending.action,
+            pending.chat_id,
+        )
+        perform_restart(config)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,10 @@ _WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
 MAX_INLINE_EXTRA_LANGS = 3
 MAX_GLOSSARY_TERMS = 100
+
+DEFAULT_UPDATE_REPO = "RUdolf1517/mivta"
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,64}$")
 
 
 class ConfigError(ValueError):
@@ -119,6 +124,32 @@ def _parse_owner_ids(raw: str) -> tuple[int, ...]:
         if uid not in ids:
             ids.append(uid)
     return tuple(ids)
+
+
+_SHELL_OPERATORS: frozenset[str] = frozenset(
+    {"&&", "||", ";", "|", "&", ">", ">>", "<", "<<", "(", ")", "{", "}"}
+)
+
+
+def _parse_command(raw: str, *, var_name: str) -> tuple[str, ...]:
+    """Parse `MIVTA_UPDATE_CMD` / `MIVTA_RESTART_CMD` into argv (never run via a shell)."""
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return ()
+    try:
+        argv = tuple(shlex.split(cleaned))
+    except ValueError as exc:
+        raise ConfigError(f"{var_name} is not a valid command line: {exc}") from exc
+    if not argv:
+        return ()
+    for token in argv:
+        if token in _SHELL_OPERATORS or "$(" in token or "`" in token:
+            raise ConfigError(
+                f"{var_name} must be one executable with its arguments: "
+                f"shell operators are not supported (got {token!r}); "
+                "put the pipeline into a script and point the variable at it"
+            )
+    return argv
 
 
 def _parse_glossary(raw: str) -> tuple[str, ...]:
@@ -410,6 +441,12 @@ class Config:
     max_concurrent_translations: int = 20
     owner_ids: tuple[int, ...] = ()
     sync_bot_profile: bool = True
+    self_update: bool = True
+    self_restart: bool = True
+    update_repo: str = DEFAULT_UPDATE_REPO
+    update_branch: str = "main"
+    update_cmd: tuple[str, ...] = ()
+    restart_cmd: tuple[str, ...] = ()
     log_level: str = "INFO"
 
     @classmethod
@@ -575,6 +612,33 @@ class Config:
             "SYNC_BOT_PROFILE",
             merged.get("SYNC_BOT_PROFILE", "true"),
         )
+        self_update = _parse_bool(
+            "SELF_UPDATE",
+            merged.get("SELF_UPDATE", "true"),
+        )
+        self_restart = _parse_bool(
+            "SELF_RESTART",
+            merged.get("SELF_RESTART", "true"),
+        )
+
+        update_repo = merged.get("MIVTA_UPDATE_REPO", DEFAULT_UPDATE_REPO).strip()
+        if not _REPO_SLUG_RE.match(update_repo):
+            raise ConfigError(
+                f"MIVTA_UPDATE_REPO must look like 'owner/repo', got {update_repo!r}"
+            )
+        update_branch = merged.get("MIVTA_BRANCH", "main").strip() or "main"
+        if not _BRANCH_RE.match(update_branch):
+            raise ConfigError(
+                f"MIVTA_BRANCH must be a git ref name (1..64 chars), got {update_branch!r}"
+            )
+        update_cmd = _parse_command(
+            merged.get("MIVTA_UPDATE_CMD", ""),
+            var_name="MIVTA_UPDATE_CMD",
+        )
+        restart_cmd = _parse_command(
+            merged.get("MIVTA_RESTART_CMD", ""),
+            var_name="MIVTA_RESTART_CMD",
+        )
 
         log_level = merged.get("LOG_LEVEL", "INFO").strip().upper()
         if log_level not in VALID_LOG_LEVELS:
@@ -626,5 +690,11 @@ class Config:
             max_concurrent_translations=max_concurrent,
             owner_ids=owner_ids,
             sync_bot_profile=sync_bot_profile,
+            self_update=self_update,
+            self_restart=self_restart,
+            update_repo=update_repo,
+            update_branch=update_branch,
+            update_cmd=update_cmd,
+            restart_cmd=restart_cmd,
             log_level=log_level,
         )
