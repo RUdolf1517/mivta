@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     target_lang TEXT NOT NULL DEFAULT 'en',
     swap_lang TEXT DEFAULT NULL,
     ui_lang TEXT DEFAULT NULL,
+    transliterate INTEGER DEFAULT NULL,
     style TEXT NOT NULL DEFAULT 'neutral'
         CHECK (style IN ('neutral', 'casual', 'formal')),
     extra_langs TEXT DEFAULT NULL,
@@ -99,6 +100,18 @@ def _normalize_swap_lang_input(raw: str) -> str:
     return resolved
 
 
+def _parse_transliterate(raw: object) -> bool | None:
+    """NULL means "inherit TRANSLITERATE from the config"."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, bool)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    return text in ("1", "true", "yes", "on")
+
+
 def _normalize_ui_lang_input(raw: str) -> str:
     stripped = raw.strip()
     if not stripped:
@@ -120,6 +133,7 @@ class UserSettings:
     extra_langs: tuple[str, ...] = ()
     swap_lang: str = ""
     ui_lang: str = ""
+    transliterate: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +227,10 @@ class Database:
             await conn.execute(
                 "ALTER TABLE user_settings ADD COLUMN ui_lang TEXT DEFAULT NULL;"
             )
+        if "transliterate" not in cols:
+            await conn.execute(
+                "ALTER TABLE user_settings ADD COLUMN transliterate INTEGER DEFAULT NULL;"
+            )
 
         await conn.commit()
         self._conn = conn
@@ -243,8 +261,8 @@ class Database:
         """Fetch saved settings for user_id, falling back to configured defaults."""
         conn = self._require_conn()
         async with conn.execute(
-            "SELECT source_lang, target_lang, swap_lang, ui_lang, style, extra_langs "
-            "FROM user_settings WHERE user_id = ?",
+            "SELECT source_lang, target_lang, swap_lang, ui_lang, style, extra_langs, "
+            "transliterate FROM user_settings WHERE user_id = ?",
             (user_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -282,6 +300,7 @@ class Database:
             extra_langs=extra_langs,
             swap_lang=swap_lang,
             ui_lang=ui_lang,
+            transliterate=_parse_transliterate(row["transliterate"]),
         )
 
     async def update_user_settings(
@@ -294,13 +313,14 @@ class Database:
         ui_lang: str | None = None,
         style: TranslationStyle | None = None,
         extra_langs: Sequence[str] | None = None,
+        transliterate: bool | None = None,
     ) -> UserSettings:
         """Atomically upsert one or more user preferences and return the resulting settings."""
         conn = self._require_conn()
         async with self._write_lock:
             async with conn.execute(
-                "SELECT source_lang, target_lang, swap_lang, ui_lang, style, extra_langs "
-                "FROM user_settings WHERE user_id = ?",
+                "SELECT source_lang, target_lang, swap_lang, ui_lang, style, extra_langs, "
+                "transliterate FROM user_settings WHERE user_id = ?",
                 (user_id,),
             ) as cursor:
                 existing_row = await cursor.fetchone()
@@ -321,6 +341,7 @@ class Database:
             next_extra = current.extra_langs
             next_swap = current.swap_lang
             next_ui = current.ui_lang
+            next_transliterate = current.transliterate
 
             if source_lang is not None:
                 resolved_src = resolve_language(source_lang, allow_auto=True)
@@ -345,6 +366,9 @@ class Database:
             if style is not None:
                 next_style = style
 
+            if transliterate is not None:
+                next_transliterate = bool(transliterate)
+
             if extra_langs is not None:
                 next_extra = _normalize_extra_langs_input(extra_langs)
                 stored_extra = ",".join(next_extra)
@@ -354,9 +378,9 @@ class Database:
                 """
                 INSERT INTO user_settings (
                     user_id, source_lang, target_lang, swap_lang, ui_lang,
-                    style, extra_langs, updated_at
+                    style, extra_langs, transliterate, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     source_lang = excluded.source_lang,
                     target_lang = excluded.target_lang,
@@ -364,6 +388,7 @@ class Database:
                     ui_lang = excluded.ui_lang,
                     style = excluded.style,
                     extra_langs = excluded.extra_langs,
+                    transliterate = excluded.transliterate,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -374,6 +399,7 @@ class Database:
                     stored_ui,
                     next_style.value,
                     stored_extra,
+                    None if next_transliterate is None else int(next_transliterate),
                     now_ts,
                 ),
             )
@@ -387,7 +413,22 @@ class Database:
                 extra_langs=next_extra,
                 swap_lang=next_swap,
                 ui_lang=next_ui,
+                transliterate=next_transliterate,
             )
+
+    async def has_transliterate_enabled(self) -> bool:
+        """True when at least one user turned «как читается» on explicitly.
+
+        Used at boot to decide whether the (heavy) romanizers are worth loading.
+        """
+        conn = self._require_conn()
+        try:
+            async with conn.execute(
+                "SELECT 1 FROM user_settings WHERE transliterate = 1 LIMIT 1"
+            ) as cursor:
+                return await cursor.fetchone() is not None
+        except aiosqlite.Error:  # pragma: no cover - column missing on old schema
+            return False
 
     async def delete_user_data(self, user_id: int) -> bool:
         """Delete stored preferences and disabled Business connection rows for user_id."""

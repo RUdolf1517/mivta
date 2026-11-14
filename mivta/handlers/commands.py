@@ -52,6 +52,10 @@ from mivta.utils.languages import (
     resolve_language,
 )
 from mivta.utils.metrics import RuntimeMetrics
+from mivta.utils.transliteration import (
+    reading_enabled,
+    supports_reading,
+)
 
 _CLEAR_TOKENS = frozenset({"off", "clear", "none", "reset", "выкл", "сброс", "-"})
 
@@ -80,10 +84,24 @@ def _format_swap_lang(swap_lang: str, ui_lang: str) -> str:
     return language_label(swap_lang, ui_lang=ui_lang)
 
 
+def _format_reading_state(
+    target_lang: str,
+    enabled: bool,
+    ui_lang: str,
+) -> str:
+    """State of «как читается» — including the case where the target has no reading."""
+    if not supports_reading(target_lang):
+        return "n/a" if ui_lang == "en" else "недоступно"
+    if not enabled:
+        return "off" if ui_lang == "en" else "выкл"
+    return "on" if ui_lang == "en" else "вкл"
+
+
 def _format_settings_text(
     settings: UserSettings,
     bot_username: str,
     ui_lang: str,
+    config_default: bool = False,
 ) -> str:
     """Compact one-screen state: direction + style + extras, details live in /help."""
     is_en = ui_lang == "en"
@@ -97,12 +115,18 @@ def _format_settings_text(
 
     st_label = style_label(settings.style, ui_lang).capitalize()
     extra_str = _format_extra_langs(settings.extra_langs, ui_lang)
+    reading_str = _format_reading_state(
+        settings.target_lang,
+        reading_enabled(settings.transliterate, config_default),
+        ui_lang,
+    )
 
     if is_en:
         return (
             "mivta Translation Settings\n\n"
             f"🌍 {direction} · {st_label}\n"
-            f"• Extra card languages: {extra_str}\n\n"
+            f"• Extra card languages: {extra_str}\n"
+            f"• Latin reading: {reading_str}\n\n"
             f"Quick filters in @{bot_username}: >de text · ru>en text · !formal text\n"
             "Changes below apply instantly; tap «How to use» for the full guide."
         )
@@ -110,7 +134,8 @@ def _format_settings_text(
     return (
         "Настройки перевода mivta\n\n"
         f"🌍 {direction} · {st_label}\n"
-        f"• Доп. языки карточек: {extra_str}\n\n"
+        f"• Доп. языки карточек: {extra_str}\n"
+        f"• Чтение латиницей: {reading_str}\n\n"
         f"Быстрые фильтры в @{bot_username}: >de текст · ru>en текст · !formal текст\n"
         "Всё ниже меняется одним нажатием; полная справка — по кнопке «Как пользоваться»."
     )
@@ -249,7 +274,9 @@ def _help_section_text(section: str, bot_username: str, ui_lang: str) -> str:
                 "• /source auto — detect the source language (or /source ru);\n"
                 "• /style formal — default register: neutral · casual · formal;\n"
                 "• /langs pl de — extra card languages (up to 3);\n"
-                "• /ui ru|en|auto — language of the bot's own menus.\n"
+                "• /ui ru|en|auto — language of the bot's own menus;\n"
+                "• «Latin reading» in /settings — a second line under the "
+                "translation showing how to pronounce it (RU, EL, KA, HY, KO, ZH, JA).\n"
                 "All of it is also one tap away in /settings."
             )
         return (
@@ -411,11 +438,25 @@ def _format_privacy_text(ui_lang: str) -> str:
     )
 
 
+def _reading_toggle_text(
+    target_lang: str,
+    enabled: bool,
+    ui_lang: str,
+) -> str:
+    """Button label for «как читается»; dimmed when the target has no reading."""
+    is_en = ui_lang == "en"
+    if not supports_reading(target_lang):
+        return "🔤 Reading: n/a" if is_en else "🔤 Чтение: н/д"
+    state = ("on" if enabled else "off") if is_en else ("вкл" if enabled else "выкл")
+    return f"🔤 Reading: {state}" if is_en else f"🔤 Чтение: {state}"
+
+
 def _main_settings_keyboard(
     settings: UserSettings,
     *,
     ui_lang: str,
     telegram_lang_code: str | None = None,
+    config_default: bool = False,
 ) -> InlineKeyboardMarkup:
     is_en = ui_lang == "en"
     rows: list[list[InlineKeyboardButton]] = []
@@ -518,13 +559,22 @@ def _main_settings_keyboard(
             ]
         )
 
-    # Full guide lives behind one button so the panel stays one screen tall
+    # Full guide lives behind one button so the panel stays one screen tall.
+    # The reading toggle shares its row — otherwise the panel grows a row taller.
     rows.append(
         [
             InlineKeyboardButton(
                 text="ℹ️ How to use" if is_en else "ℹ️ Как пользоваться",
                 callback_data="cfg:help",
-            )
+            ),
+            InlineKeyboardButton(
+                text=_reading_toggle_text(
+                    settings.target_lang,
+                    reading_enabled(settings.transliterate, config_default),
+                    ui_lang,
+                ),
+                callback_data="cfg:toggle_reading",
+            ),
         ]
     )
 
@@ -743,9 +793,15 @@ async def cmd_start(
         settings,
         ui_lang=ui,
         telegram_lang_code=message.from_user.language_code,
+            config_default=config.transliterate_default,
     )
     if command.args and command.args.strip().lower() == "settings":
-        await message.answer(_format_settings_text(settings, bot_username, ui), reply_markup=kb)
+        await message.answer(
+            _format_settings_text(
+                settings, bot_username, ui, config.transliterate_default
+            ),
+            reply_markup=kb,
+        )
         return
 
     if ui == "en":
@@ -780,11 +836,12 @@ async def cmd_settings(
     settings = await db.get_user_settings(message.from_user.id)
     ui = _ui_for(message.from_user, settings, config)
     await message.answer(
-        _format_settings_text(settings, bot_username, ui),
+        _format_settings_text(settings, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             settings,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -872,11 +929,12 @@ async def cmd_lang(
 
     updated = await db.update_user_settings(user_id, target_lang=resolved)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -912,11 +970,12 @@ async def cmd_swap(
     if raw_args.lower() in _CLEAR_TOKENS:
         updated = await db.update_user_settings(user_id, swap_lang="")
         await message.answer(
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             reply_markup=_main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=message.from_user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         return
@@ -938,11 +997,12 @@ async def cmd_swap(
 
     updated = await db.update_user_settings(user_id, swap_lang=resolved)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -977,11 +1037,12 @@ async def cmd_langs(
     if raw_args.lower() in _CLEAR_TOKENS:
         updated = await db.update_user_settings(user_id, extra_langs=())
         await message.answer(
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             reply_markup=_main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=message.from_user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         return
@@ -1020,11 +1081,12 @@ async def cmd_langs(
 
     updated = await db.update_user_settings(user_id, extra_langs=resolved_codes)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -1074,11 +1136,12 @@ async def cmd_source(
 
     updated = await db.update_user_settings(user_id, source_lang=resolved)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -1099,11 +1162,12 @@ async def cmd_style(
 
     if not command.args or not command.args.strip():
         await message.answer(
-            _format_settings_text(settings, bot_username, ui),
+            _format_settings_text(settings, bot_username, ui, config.transliterate_default),
             reply_markup=_main_settings_keyboard(
                 settings,
                 ui_lang=ui,
                 telegram_lang_code=message.from_user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         return
@@ -1124,11 +1188,12 @@ async def cmd_style(
 
     updated = await db.update_user_settings(user_id, style=parsed)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -1153,11 +1218,12 @@ async def cmd_ui(
         updated = await db.update_user_settings(user_id, ui_lang=toggled)
         ui = _ui_for(message.from_user, updated, config)
         await message.answer(
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             reply_markup=_main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=message.from_user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         return
@@ -1174,11 +1240,12 @@ async def cmd_ui(
     updated = await db.update_user_settings(user_id, ui_lang=parsed)
     ui = _ui_for(message.from_user, updated, config)
     await message.answer(
-        _format_settings_text(updated, bot_username, ui),
+        _format_settings_text(updated, bot_username, ui, config.transliterate_default),
         reply_markup=_main_settings_keyboard(
             updated,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -1239,6 +1306,7 @@ async def cmd_reset(
             fresh,
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
+                config_default=config.transliterate_default,
         ),
     )
 
@@ -1266,11 +1334,12 @@ async def handle_settings_callback(
     if action == "main":
         await _edit_safely(
             callback,
-            _format_settings_text(settings, bot_username, ui),
+            _format_settings_text(settings, bot_username, ui, config.transliterate_default),
             _main_settings_keyboard(
                 settings,
                 ui_lang=ui,
                 telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
             ),
         )
         await callback.answer()
@@ -1369,6 +1438,36 @@ async def handle_settings_callback(
         await callback.answer(note)
         return
 
+    if action == "toggle_reading":
+        current = reading_enabled(settings.transliterate, config.transliterate_default)
+        next_state = not current
+        if next_state and not supports_reading(settings.target_lang):
+            await callback.answer(
+                "No Latin reading for this language yet"
+                if is_en
+                else "Для этого языка чтение пока недоступно"
+            )
+            return
+        updated = await db.update_user_settings(user_id, transliterate=next_state)
+        await _edit_safely(
+            callback,
+            _format_settings_text(
+                updated, bot_username, ui, config.transliterate_default
+            ),
+            _main_settings_keyboard(
+                updated,
+                ui_lang=ui,
+                telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
+            ),
+        )
+        await callback.answer(
+            "Latin reading on" if next_state else "Latin reading off"
+        ) if is_en else await callback.answer(
+            "Чтение латиницей включено" if next_state else "Чтение латиницей выключено"
+        )
+        return
+
     if action == "clear_extra":
         page = 2 if arg == "2" else 1
         updated = await db.update_user_settings(user_id, extra_langs=())
@@ -1395,11 +1494,12 @@ async def handle_settings_callback(
         lbl = language_label(resolved, ui_lang=ui)
         await _edit_safely(
             callback,
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             _main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
             ),
         )
         await callback.answer(f"Target: {lbl}" if is_en else f"Язык перевода: {lbl}")
@@ -1414,11 +1514,12 @@ async def handle_settings_callback(
         lbl = language_label(resolved, ui_lang=ui)
         await _edit_safely(
             callback,
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             _main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
             ),
         )
         await callback.answer(f"Source: {lbl}" if is_en else f"Исходный язык: {lbl}")
@@ -1438,11 +1539,12 @@ async def handle_settings_callback(
             toast = f"Auto-swap: {lbl}" if is_en else f"Авто-смена: {lbl}"
         await _edit_safely(
             callback,
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             _main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
             ),
         )
         await callback.answer(toast)
@@ -1457,11 +1559,12 @@ async def handle_settings_callback(
         st_lbl = style_label(style, ui)
         await _edit_safely(
             callback,
-            _format_settings_text(updated, bot_username, ui),
+            _format_settings_text(updated, bot_username, ui, config.transliterate_default),
             _main_settings_keyboard(
                 updated,
                 ui_lang=ui,
                 telegram_lang_code=user.language_code,
+                config_default=config.transliterate_default,
             ),
         )
         await callback.answer(f"Style: {st_lbl}" if is_en else f"Стиль: {st_lbl}")
@@ -1476,11 +1579,12 @@ async def handle_settings_callback(
         new_ui = _ui_for(user, updated, config)
         await _edit_safely(
             callback,
-            _format_settings_text(updated, bot_username, new_ui),
+            _format_settings_text(updated, bot_username, new_ui, config.transliterate_default),
             _main_settings_keyboard(
                 updated,
                 ui_lang=new_ui,
                 telegram_lang_code=user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         await callback.answer("Language: English" if new_ui == "en" else "Язык интерфейса: Русский")
@@ -1492,11 +1596,12 @@ async def handle_settings_callback(
         new_ui = _ui_for(user, fresh, config)
         await _edit_safely(
             callback,
-            _format_settings_text(fresh, bot_username, new_ui),
+            _format_settings_text(fresh, bot_username, new_ui, config.transliterate_default),
             _main_settings_keyboard(
                 fresh,
                 ui_lang=new_ui,
                 telegram_lang_code=user.language_code,
+                    config_default=config.transliterate_default,
             ),
         )
         await callback.answer(

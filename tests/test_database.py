@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mivta.database import Database
+from mivta.database import Database, _parse_transliterate
 from mivta.translator.base import TranslationStyle
 
 
@@ -136,3 +136,89 @@ async def test_database_extra_langs_and_v010_schema_migration(tmp_path: Path) ->
     finally:
         await db.close()
 
+
+
+async def test_transliterate_toggle_persistence_and_boot_probe(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "reading.db")
+    db = Database(
+        db_path,
+        default_source_lang="auto",
+        default_target_lang="en",
+        default_style=TranslationStyle.NEUTRAL,
+    )
+    await db.connect()
+
+    # Unset by default: the operator-level TRANSLITERATE decides.
+    assert (await db.get_user_settings(7)).transliterate is None
+    assert await db.has_transliterate_enabled() is False
+
+    updated = await db.update_user_settings(7, transliterate=True)
+    assert updated.transliterate is True
+
+    # Settings are per-user: user 8 must not inherit user 7's choice.
+    assert (await db.get_user_settings(8)).transliterate is None
+    assert await db.has_transliterate_enabled() is True
+
+    # Other fields survive the toggle round-trip.
+    await db.update_user_settings(7, target_lang="ja")
+    assert (await db.get_user_settings(7)).target_lang == "ja"
+    assert (await db.get_user_settings(7)).transliterate is True
+
+    off = await db.update_user_settings(7, transliterate=False)
+    assert off.transliterate is False
+    assert await db.has_transliterate_enabled() is False
+
+    await db.close()
+
+    # Survives a restart.
+    db2 = Database(
+        db_path,
+        default_source_lang="auto",
+        default_target_lang="en",
+        default_style=TranslationStyle.NEUTRAL,
+    )
+    await db2.connect()
+    assert (await db2.get_user_settings(7)).transliterate is False
+    await db2.close()
+
+
+async def test_transliterate_column_is_added_to_legacy_schema(tmp_path: Path) -> None:
+    """A DB created before the toggle existed must gain the column on connect."""
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            "CREATE TABLE user_settings ("
+            "user_id INTEGER PRIMARY KEY, source_lang TEXT NOT NULL, "
+            "target_lang TEXT NOT NULL, swap_lang TEXT NOT NULL DEFAULT '', "
+            "ui_lang TEXT DEFAULT NULL, style TEXT NOT NULL DEFAULT 'neutral', "
+            "extra_langs TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL)"
+        )
+        await conn.execute(
+            "INSERT INTO user_settings (user_id, source_lang, target_lang, updated_at) "
+            "VALUES (1, 'auto', 'en', 0)"
+        )
+        await conn.commit()
+
+    db = Database(
+        str(db_path),
+        default_source_lang="auto",
+        default_target_lang="en",
+        default_style=TranslationStyle.NEUTRAL,
+    )
+    await db.connect()
+    settings = await db.get_user_settings(1)
+    assert settings.transliterate is None
+    assert (await db.update_user_settings(1, transliterate=True)).transliterate is True
+    await db.close()
+
+
+def test_parse_transliterate_accepts_sqlite_shapes() -> None:
+    assert _parse_transliterate(None) is None
+    assert _parse_transliterate(0) is False
+    assert _parse_transliterate(1) is True
+    assert _parse_transliterate("") is None
+    assert _parse_transliterate("1") is True
+    assert _parse_transliterate("true") is True
+    assert _parse_transliterate("0") is False

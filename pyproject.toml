@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mivta"
-version = "7.5"
+version = "7.6"
 description = "Minimalist Telegram Inline & Secretary Mode translator bot"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,10 +16,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# «Как читается»: Latin reading for non-Latin scripts (~14 MB of tables).
+# Optional — without it the feature silently stays off.
+reading = [
+    "uroman>=1.3",
+    "pypinyin>=0.51",
+    "pykakasi>=2.3",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "uroman>=1.3",
+    "pypinyin>=0.51",
+    "pykakasi>=2.3",
 ]
 
 [project.scripts]

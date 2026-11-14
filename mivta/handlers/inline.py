@@ -46,6 +46,10 @@ from mivta.utils.languages import resolve_auto_swap_target
 from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_inline_query, truncate_preview
 from mivta.utils.ratelimit import RateLimiter
+from mivta.utils.transliteration import (
+    reading_enabled,
+    with_reading,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,7 @@ def _translation_article(
     body: str,
     ui_lang: str = "ru",
     entities: list[MessageEntity] | None = None,
+    reading: bool = False,
 ) -> InlineQueryResultArticle:
     if source_requested == "auto" and result.source_lang != "auto":
         direction = f"auto ({result.source_lang}) → {result.target_lang}"
@@ -117,12 +122,20 @@ def _translation_article(
     st_label = style_label(result.style, ui_lang)
     description = f"{direction} · {st_label}"
 
+    # The reading goes after the entities were resolved, so no offset shifts.
+    full_body = with_reading(
+        body,
+        result.target_lang,
+        enabled=reading,
+        max_total=TELEGRAM_MAX_MESSAGE_LEN,
+    )
+
     return InlineQueryResultArticle(
-        id=_article_id("ok", direction, result.style.value, body),
+        id=_article_id("ok", direction, result.style.value, full_body),
         title=truncate_preview(body),
         description=description,
         input_message_content=InputTextMessageContent(
-            message_text=body,
+            message_text=full_body,
             entities=entities,
             parse_mode=None,
         ),
@@ -190,6 +203,9 @@ async def handle_inline_query(
     is_en = ui == "en"
     parsed = parse_inline_query(inline_query.query, ui_lang=ui)
 
+    reading_on = reading_enabled(
+        user_settings.transliterate, config.transliterate_default
+    )
     effective_source = parsed.source_lang or user_settings.source_lang
     effective_target = parsed.target_lang or user_settings.target_lang
     effective_style = parsed.style or user_settings.style
@@ -291,6 +307,7 @@ async def handle_inline_query(
                     body=restored.text,
                     ui_lang=ui,
                     entities=restored.entities,
+                    reading=reading_on,
                 )
             ],
             button=button,
@@ -523,6 +540,7 @@ async def handle_inline_query(
                 body=restored.text,
                 ui_lang=ui,
                 entities=restored.entities,
+                reading=reading_on,
             )
         )
 
