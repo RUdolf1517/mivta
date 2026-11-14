@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from mivta.translator.base import TranslationRequest, TranslationResult
+from mivta.utils.digest import translation_digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,20 +18,8 @@ class _CacheEntry:
 
 
 def _make_key(provider: str, request: TranslationRequest) -> bytes:
-    """Create a collision-free compact 16-byte key so plaintext inputs aren't duplicated."""
-    hasher = hashlib.blake2b(digest_size=16)
-    for part in (
-        provider,
-        request.source_lang,
-        request.target_lang,
-        request.swap_lang,
-        request.style.value,
-        request.text,
-    ):
-        encoded = part.encode("utf-8")
-        hasher.update(len(encoded).to_bytes(4, "big"))
-        hasher.update(encoded)
-    return hasher.digest()
+    """16-byte key for a provider/request pair (see `mivta.utils.digest`)."""
+    return translation_digest(provider, request)
 
 
 class TranslationCache:
@@ -102,14 +90,34 @@ class TranslationCache:
         """Store a translation result until TTL expires."""
         if not self.enabled:
             return
-        self.purge_expired()
         now = self._clock()
         key = _make_key(provider, request)
         if key in self._entries:
             self._entries.move_to_end(key)
-        elif len(self._entries) >= self._max_size:
-            self._entries.popitem(last=False)
+        else:
+            if len(self._entries) >= self._max_size:
+                # Full: expired entries are the cheapest thing to evict first
+                self.purge_expired()
+            while len(self._entries) >= self._max_size:
+                self._entries.popitem(last=False)
         self._entries[key] = _CacheEntry(expires_at=now + self._ttl, result=result)
+
+    def peek(self, provider: str, request: TranslationRequest) -> bool:
+        """True when a fresh entry exists, without touching hit/miss statistics.
+
+        Warm-checks run on every inline keystroke, so counting them as lookups
+        would drown the owner-facing hit-rate numbers in misses.
+        """
+        if not self.enabled:
+            return False
+        key = _make_key(provider, request)
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        if entry.expires_at <= self._clock():
+            self._entries.pop(key, None)
+            return False
+        return True
 
     def purge_expired(self) -> int:
         """Actively remove all expired entries so translations are not retained past TTL."""

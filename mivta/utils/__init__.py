@@ -22,8 +22,8 @@ from mivta.utils.ratelimit import RateLimiter
 
 __all__ = [
     "AUTO_LANG",
-    "LANGUAGE_BY_CODE",
     "LANGUAGES",
+    "LANGUAGE_BY_CODE",
     "ParsedInlineQuery",
     "RateLimiter",
     "TranslationCache",

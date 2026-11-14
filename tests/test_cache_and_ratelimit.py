@@ -100,3 +100,48 @@ def test_rate_limiter_burst_refill_and_memory_bound() -> None:
     for uid in (201, 202, 203, 204):
         assert limiter.allow(uid)[0] is True
     assert limiter.tracked_users() == 3
+
+
+def test_cache_peek_is_statistics_neutral() -> None:
+    clock = FakeClock()
+    cache = TranslationCache(max_size=4, ttl_seconds=60.0, clock=clock)
+    req, res = _sample_pair("Привет")
+
+    assert cache.peek("mock", req) is False
+    assert (cache.hits, cache.misses) == (0, 0)
+
+    cache.set("mock", req, res)
+    assert cache.peek("mock", req) is True
+    assert cache.peek("mock", _sample_pair("Пока")[0]) is False
+    # Warm-checks must not be counted as lookups
+    assert (cache.hits, cache.misses) == (0, 0)
+    assert cache.get("mock", req) == res
+    assert (cache.hits, cache.misses) == (1, 0)
+
+
+def test_cache_peek_drops_expired_entry() -> None:
+    clock = FakeClock()
+    cache = TranslationCache(max_size=4, ttl_seconds=30.0, clock=clock)
+    req, res = _sample_pair("Привет")
+    cache.set("mock", req, res)
+
+    clock.advance(31.0)
+    assert cache.peek("mock", req) is False
+    assert len(cache) == 0
+
+
+def test_cache_set_evicts_expired_before_live_entries() -> None:
+    clock = FakeClock()
+    cache = TranslationCache(max_size=2, ttl_seconds=10.0, clock=clock)
+    req1, res1 = _sample_pair("one")
+    req2, res2 = _sample_pair("two")
+    req3, res3 = _sample_pair("three")
+
+    cache.set("mock", req1, res1)
+    clock.advance(11.0)  # req1 is now stale
+    cache.set("mock", req2, res2)  # room available, no eviction needed yet
+    cache.set("mock", req3, res3)  # full: the stale req1 goes first
+
+    assert cache.get("mock", req3) == res3
+    assert cache.get("mock", req2) == res2
+    assert cache.get("mock", req1) is None

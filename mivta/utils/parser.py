@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mivta.translator.base import TranslationStyle, parse_style
 from mivta.utils.languages import resolve_language
+from mivta.utils.utf16 import U16OffsetMap
 
 if TYPE_CHECKING:
     from aiogram.types import MessageEntity
@@ -81,6 +83,8 @@ def has_translatable_text(text: str) -> bool:
 def truncate_preview(text: str, limit: int = 80) -> str:
     """Collapse newlines for single-line Telegram inline result titles."""
     single_line = " ".join(text.split())
+    if limit <= 1:
+        return "…" if single_line else ""
     if len(single_line) <= limit:
         return single_line
     return single_line[: limit - 1].rstrip() + "…"
@@ -96,50 +100,35 @@ def _rebase_entities_from_map(
     if not entities or not body_text or not body_to_raw:
         return ()
 
-    raw_u16: list[int] = [0] * (len(raw) + 1)
-    acc = 0
-    for i, ch in enumerate(raw):
-        acc += 2 if ord(ch) > 0xFFFF else 1
-        raw_u16[i + 1] = acc
+    raw_map = U16OffsetMap(raw)
+    body_map = U16OffsetMap(body_text)
+    body_len = len(body_text)
 
-    u16_to_raw_py: dict[int, int] = {u16: py_i for py_i, u16 in enumerate(raw_u16)}
-
-    body_u16: list[int] = [0] * (len(body_text) + 1)
-    acc_b = 0
-    for i, ch in enumerate(body_text):
-        acc_b += 2 if ord(ch) > 0xFFFF else 1
-        body_u16[i + 1] = acc_b
-
-    # Map each raw python position to its corresponding body python position (or boundary)
+    # `body_to_raw` is strictly increasing, so boundary lookups are bisects
+    # instead of linear scans (matters for long messages with many entities).
     first_raw = body_to_raw[0]
     last_raw_excl = body_to_raw[-1] + 1
 
     def _map_raw_start(raw_py: int) -> int:
         if raw_py <= first_raw:
             return 0
-        for b_idx, r_idx in enumerate(body_to_raw):
-            if r_idx >= raw_py:
-                return b_idx
-        return len(body_text)
+        return bisect_left(body_to_raw, raw_py)
 
     def _map_raw_end(raw_py: int) -> int:
         if raw_py <= first_raw:
             return 0
         if raw_py >= last_raw_excl:
-            return len(body_text)
-        for b_idx in range(len(body_to_raw) - 1, -1, -1):
-            if body_to_raw[b_idx] < raw_py:
-                return b_idx + 1
-        return 0
+            return body_len
+        return bisect_left(body_to_raw, raw_py)
 
     rebased: list[MessageEntity] = []
     for ent in entities:
         u_start = ent.offset
         u_end = ent.offset + ent.length
-        if u_end <= u_start or u_start < 0 or u_end > raw_u16[-1]:
+        if u_end <= u_start or u_start < 0 or u_end > raw_map.total:
             continue
-        raw_py_start = u16_to_raw_py.get(u_start)
-        raw_py_end = u16_to_raw_py.get(u_end)
+        raw_py_start = raw_map.to_python(u_start)
+        raw_py_end = raw_map.to_python(u_end)
         if raw_py_start is None or raw_py_end is None:
             continue
         if raw_py_end <= first_raw or raw_py_start >= last_raw_excl:
@@ -150,8 +139,8 @@ def _rebase_entities_from_map(
         if b_end <= b_start:
             continue
 
-        new_u_off = body_u16[b_start]
-        new_u_len = body_u16[b_end] - new_u_off
+        new_u_off = body_map.to_utf16(b_start)
+        new_u_len = body_map.to_utf16(b_end) - new_u_off
         if new_u_len <= 0:
             continue
         rebased.append(ent.model_copy(update={"offset": new_u_off, "length": new_u_len}))

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -16,6 +15,7 @@ from mivta.translator.base import (
     deduplicate_styles,
 )
 from mivta.utils.cache import TranslationCache
+from mivta.utils.digest import translation_digest
 from mivta.utils.formatting import (
     MAX_TRANSLATION_CHUNKS,
     join_translated_chunks,
@@ -45,19 +45,7 @@ class InflightEntry:
 
 def inflight_key(provider: str, request: TranslationRequest) -> bytes:
     """Collision-free 16-byte digest for deduplicating identical concurrent translations."""
-    hasher = hashlib.blake2b(digest_size=16)
-    for item in (
-        provider,
-        request.source_lang,
-        request.target_lang,
-        request.swap_lang,
-        request.style.value,
-        request.text,
-    ):
-        encoded = item.encode("utf-8")
-        hasher.update(len(encoded).to_bytes(4, "big"))
-        hasher.update(encoded)
-    return hasher.digest()
+    return translation_digest(provider, request)
 
 
 def _should_provider_swap(request: TranslationRequest, result: TranslationResult) -> bool:
@@ -84,19 +72,14 @@ def is_query_cached(
     """Return True when all requested variants are already warm in TranslationCache."""
     if multilang_mode:
         return all(
-            cache.get(
-                provider_name,
-                replace(base_request, target_lang=code, swap_lang=""),
-            )
-            is not None
+            cache.peek(provider_name, replace(base_request, target_lang=code, swap_lang=""))
             for code in target_langs
         )
     if multistyle_mode:
         return all(
-            cache.get(provider_name, replace(base_request, style=st)) is not None
-            for st in styles
+            cache.peek(provider_name, replace(base_request, style=st)) for st in styles
         )
-    return cache.get(provider_name, base_request) is not None
+    return cache.peek(provider_name, base_request)
 
 
 async def _singleflight_translate(

@@ -134,6 +134,25 @@ def test_truncate_preview() -> None:
     assert preview.endswith("…")
 
 
+@pytest.mark.parametrize("limit", [-5, -1, 0, 1])
+def test_truncate_preview_tiny_limit_never_wraps_around(limit: int) -> None:
+    """`text[:limit - 1]` used to wrap around for limit <= 1 and return most of the text."""
+    text = "the quick brown fox jumps"
+    assert truncate_preview(text, limit=limit) == "…"
+
+
+@pytest.mark.parametrize("limit", [-5, 0, 1])
+def test_truncate_preview_tiny_limit_on_empty_text(limit: int) -> None:
+    assert truncate_preview("", limit=limit) == ""
+    assert truncate_preview("   \n ", limit=limit) == ""
+
+
+def test_truncate_preview_small_limits() -> None:
+    assert truncate_preview("abcdef", limit=2) == "a…"
+    assert truncate_preview("abcdef", limit=3) == "ab…"
+    assert truncate_preview("abc def", limit=4) == "abc…"
+
+
 def test_parse_business_query_triggers_and_ignores_normal_messages() -> None:
     # Plain chat messages must return None (untouched)
     assert parse_business_query("Привет, как дела?") is None

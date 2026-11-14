@@ -67,7 +67,7 @@ sudo systemctl start mivta-update.service
 Как это работает без прав root и без sudo:
 
 - **Перезапуск.** Бот останавливает приём апдейтов, закрывает соединения и подменяет сам себя через `os.execv` — PID и systemd-юнит сохраняются, `.env` перечитывается заново. Для Docker и других схем задайте `MIVTA_RESTART_CMD` (например `docker restart mivta`).
-- **Обновление в обычной установке `install.sh`.** Код принадлежит root, поэтому бот лишь кладёт маркер `/opt/mivta/data/.update-request-<время>`, а привилегированный наблюдатель `mivta-update.path` (создаётся установщиком) запускает `mivta-update.service` → `install.sh --self-update` → `systemctl restart mivta`. Через 1–2 минуты обновлённый бот сам пишет владельцу в то же сообщение: «обновлено v7.2 → v7.3». Если код не обновился — приходит предупреждение с подсказкой проверить `journalctl -u mivta-update`.
+- **Обновление в обычной установке `install.sh`.** Код принадлежит root, поэтому бот лишь кладёт маркер `/opt/mivta/data/.update-request-<время>`, а привилегированный наблюдатель `mivta-update.path` (создаётся установщиком) запускает `mivta-update.service` → `install.sh --self-update` → `systemctl restart mivta`. Через 1–2 минуты обновлённый бот сам пишет владельцу в то же сообщение: «обновлено v7.3 → v7.4». Если код не обновился — приходит предупреждение с подсказкой проверить `journalctl -u mivta-update`.
 - **Обновление, если бот владелец своего каталога** (Docker, `--no-systemd`, dev-чек-аут): бот сам делает `git fetch` + fast-forward `checkout` и перезапускается. Если новая ревизия меняет `requirements.txt` / `pyproject.toml`, бот честно просит запустить `sudo /opt/mivta/install.sh --self-update` — зависимости должен переустановить root.
 
 Отключить функцию можно полностью (`SELF_UPDATE=false`, `SELF_RESTART=false`) или только триггер systemd (переустановка с `--no-remote-update`, либо `MIVTA_UPDATE_TRIGGER=0`).
@@ -94,7 +94,7 @@ bot.example.com {
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
-# {"status": "ok", "version": "7.2"}
+# {"status": "ok", "version": "7.3"}
 ```
 
 ---
