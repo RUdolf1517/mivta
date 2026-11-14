@@ -35,6 +35,7 @@ from mivta.translator import (
     create_translator,
 )
 from mivta.utils.cache import TranslationCache
+from mivta.utils.logtail import LogTail
 from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.ratelimit import RateLimiter
 
@@ -127,7 +128,12 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
-def configure_logging(level: str, *, secrets_to_redact: Sequence[str] = ()) -> None:
+def configure_logging(
+    level: str,
+    *,
+    secrets_to_redact: Sequence[str] = (),
+    log_tail: LogTail | None = None,
+) -> None:
     """Configure minimal structured stderr logging without leaking secrets or payloads."""
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -139,6 +145,9 @@ def configure_logging(level: str, *, secrets_to_redact: Sequence[str] = ()) -> N
     root_logger.addFilter(redactor)
     for handler in root_logger.handlers:
         handler.addFilter(redactor)
+    # Records reach the tail already redacted (logger-level filter runs first)
+    if log_tail is not None:
+        root_logger.addHandler(log_tail)
 
     # Prevent httpx/httpcore/aiohttp from logging request URLs that may contain user text
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -174,6 +183,7 @@ def create_dispatcher(
     rate_limiter: RateLimiter | None = None,
     metrics: RuntimeMetrics | None = None,
     restart: RestartController | None = None,
+    log_tail: LogTail | None = None,
     bot_username: str = "BotUsername",
 ) -> Dispatcher:
     """Wire routers and runtime dependencies into an aiogram Dispatcher."""
@@ -224,6 +234,7 @@ def create_dispatcher(
     dp["bot_username"] = bot_username
     if restart is not None:
         dp["restart"] = restart
+    dp["log_tail"] = log_tail
     return dp
 
 
@@ -336,12 +347,14 @@ async def _register_localized_commands(
             BotCommand(command="status", description="Server, API chain & user status"),
             BotCommand(command="update", description="Check for updates & restart service"),
             BotCommand(command="restart", description="Restart the bot service"),
+            BotCommand(command="logs", description="Recent warnings & errors from RAM"),
         ]
         owner_cmds_ru = [
             *BOT_COMMANDS_RU,
             BotCommand(command="status", description="Статус сервера, API и аудитории"),
             BotCommand(command="update", description="Проверить обновления и перезапустить"),
             BotCommand(command="restart", description="Перезапустить сервис бота"),
+            BotCommand(command="logs", description="Последние предупреждения и ошибки"),
         ]
         for oid in owner_ids:
             owner_scope = BotCommandScopeChat(chat_id=oid)
@@ -396,7 +409,7 @@ async def _run_webhook_server(
         await runner.cleanup()
 
 
-async def run_bot(config: Config) -> None:
+async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
     """Start SQLite, HTTP client, cache janitor, and Telegram polling or webhook server."""
     db = Database(
         config.database_path,
@@ -466,6 +479,7 @@ async def run_bot(config: Config) -> None:
             cache=cache,
             rate_limiter=rate_limiter,
             restart=restart,
+            log_tail=log_tail,
             bot_username=bot_username,
         )
 
@@ -545,6 +559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
+    tail = LogTail()
     configure_logging(
         config.log_level,
         secrets_to_redact=(
@@ -555,7 +570,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             *(spec.api_key for spec in config.translator_chain_specs),
             *(spec.email for spec in config.translator_chain_specs),
         ),
+        log_tail=tail,
     )
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run_bot(config))
+        asyncio.run(run_bot(config, tail))
     return 0

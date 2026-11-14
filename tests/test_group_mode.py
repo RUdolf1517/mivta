@@ -377,6 +377,35 @@ async def test_group_translation_entities_topics_replies_media_and_zero_loss() -
         await bot.session.close()
 
 
+async def test_group_long_message_is_translated_in_chunks() -> None:
+    """A message longer than MAX_TEXT_LENGTH is chunked, not silently dropped."""
+    config = Config(bot_token="123:TOK", inline_debounce_ms=0, max_text_length=50)
+    db = Database(":memory:")
+    await db.connect()
+    translator = TagEchoTranslator()
+    session = GroupMockSession(admin_ids={900})
+    bot = Bot(token=config.bot_token, session=session)
+    dp = create_dispatcher(config=config, db=db, translator=translator, bot_username="mivtabot")
+
+    try:
+        long_body = " ".join(f"слово{index}" for index in range(40))
+        assert len(long_body) > config.max_text_length
+        await dp.feed_update(bot, _grp_msg(1, f"> {long_body}", msg_id=3001))
+
+        sent = [c for c in session.calls if isinstance(c, SendMessage)]
+        assert len(sent) == 1
+        text = sent[0].text
+        for word in ("слово0", "слово20", "слово39"):
+            assert word in text
+        assert translator.requests, "no provider request was made"
+        assert len(translator.requests) > 1  # several chunks, one rate-limit token
+    finally:
+        await db.close()
+        await bot.session.close()
+        await db.close()
+        await bot.session.close()
+
+
 async def test_group_admin_only_settings_ignore_list_and_callbacks() -> None:
     config = Config(bot_token="123:TOK", inline_debounce_ms=0)
     db = Database(":memory:")

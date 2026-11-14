@@ -28,6 +28,7 @@ from aiogram.types import (
 from mivta.bot import create_dispatcher
 from mivta.config import Config
 from mivta.database import Database
+from mivta.handlers.pipeline import TELEGRAM_MAX_CAPTION_LEN
 from mivta.translator.base import (
     TranslationRequest,
     TranslationResult,
@@ -349,7 +350,8 @@ async def test_business_error_notifications_and_message_not_modified_handling() 
         assert isinstance(session.calls[-1], SendMessage)
         assert "Unknown target language code" in session.calls[-1].text
 
-        # 3. Over-length photo caption notifies owner privately
+        # 3. Caption longer than Telegram's own caption limit notifies owner privately
+        over_limit = TELEGRAM_MAX_CAPTION_LEN + 6
         long_caption = Message(
             message_id=22,
             date=dt.datetime.now(dt.UTC),
@@ -357,11 +359,41 @@ async def test_business_error_notifications_and_message_not_modified_handling() 
             from_user=_owner(200, "en"),
             business_connection_id="bc-err",
             photo=[PhotoSize(file_id="p1", file_unique_id="u1", width=10, height=10)],
-            caption="> " + ("A" * 25),
+            caption="> " + ("A" * over_limit),
         )
         await dp.feed_update(bot, Update(update_id=22, business_message=long_caption))
         assert isinstance(session.calls[-1], SendMessage)
-        assert "text is too long (25 / 20 chars)" in session.calls[-1].text
+        assert (
+            f"text is too long ({over_limit} / {TELEGRAM_MAX_CAPTION_LEN} chars)"
+            in session.calls[-1].text
+        )
+
+        # 3b. Text above MAX_TEXT_LENGTH is no longer rejected: it is chunked and stitched.
+        # Uses a separate owner so the rate-limit bucket of owner 200 stays untouched.
+        await db.upsert_business_connection(
+            "bc-long",
+            user_id=202,
+            user_chat_id=202,
+            can_reply=True,
+            is_enabled=True,
+        )
+        long_text = " ".join(f"word{index}" for index in range(30))
+        assert len(long_text) > config.max_text_length
+        long_msg = Message(
+            message_id=25,
+            date=dt.datetime.now(dt.UTC),
+            chat=Chat(id=888, type="private"),
+            from_user=_owner(202, "en"),
+            business_connection_id="bc-long",
+            text=f"> {long_text}",
+        )
+        await dp.feed_update(bot, Update(update_id=25, business_message=long_msg))
+        assert isinstance(session.calls[-1], EditMessageText)
+        stitched = session.calls[-1].text
+        assert "too long" not in stitched
+        for word in ("word0", "word15", "word29"):
+            assert word in stitched
+        assert len(stitched) > len(long_text)  # translated in several chunks
 
         # 4. Upstream failure notifies owner and leaves original message intact
         translator.fail = True

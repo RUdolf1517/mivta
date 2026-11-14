@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/RUdolf1517/mivta/main/install.sh | 
 - `--swap-lang <CODE>` — парный язык авто-разворота по умолчанию
 - `--webhook-url <HTTPS>`, `--webhook-secret <SEC>`, `--webhook-port <PORT>` — включить режим Webhook
 - `--auto-update-time <HH:MM>` / `--no-auto-update` — настроить или отключить ежедневный таймер обновления
-- `--owner-id <ID>` — числовой Telegram ID владельца, которому доступны `/status`, `/update` и `/restart`
+- `--owner-id <ID>` — числовой Telegram ID владельца, которому доступны `/status`, `/update`, `/restart` и `/logs`
 - `--no-remote-update` — не создавать триггер `mivta-update.path` (запретить обновление по кнопке из Telegram)
 - `--self-update` — безопасное обновление с автоматическим откатом на предыдущий коммит при ошибке проверки пакета
 - `--uninstall` / `--uninstall --purge` — удалить `systemd`-юниты (с `--purge` также удаляются `/opt/mivta` и пользователь `mivta`)
@@ -54,7 +54,7 @@ sudo systemctl list-timers mivta-update.timer
 sudo systemctl start mivta-update.service
 ```
 
-### Обновление и перезапуск прямо из Telegram (`/update`, `/restart`)
+### Обновление, перезапуск и логи прямо из Telegram (`/update`, `/restart`, `/logs`)
 
 Если в `.env` указан `OWNER_ID`, владелец бота может обновлять и перезапускать сервис из личного чата — ssh больше не нужен:
 
@@ -62,11 +62,12 @@ sudo systemctl start mivta-update.service
 | :--- | :--- |
 | `/update` | Проверяет новую ревизию/релиз и показывает кнопку «Обновить и перезапустить» |
 | `/restart` | Просит подтверждение и поднимает процесс заново (~2 секунды) |
+| `/logs` | Показывает последние записи WARNING/ERROR из памяти процесса (кнопки «🔄 Обновить» и «🧹 Очистить»); то же — кнопкой «📋 Логи ▸» в `/status` |
 
 Как это работает без прав root и без sudo:
 
 - **Перезапуск.** Бот останавливает приём апдейтов, закрывает соединения и подменяет сам себя через `os.execv` — PID и systemd-юнит сохраняются, `.env` перечитывается заново. Для Docker и других схем задайте `MIVTA_RESTART_CMD` (например `docker restart mivta`).
-- **Обновление в обычной установке `install.sh`.** Код принадлежит root, поэтому бот лишь кладёт маркер `/opt/mivta/data/.update-request-<время>`, а привилегированный наблюдатель `mivta-update.path` (создаётся установщиком) запускает `mivta-update.service` → `install.sh --self-update` → `systemctl restart mivta`. Через 1–2 минуты обновлённый бот сам пишет владельцу в то же сообщение: «обновлено v7.0 → v7.1». Если код не обновился — приходит предупреждение с подсказкой проверить `journalctl -u mivta-update`.
+- **Обновление в обычной установке `install.sh`.** Код принадлежит root, поэтому бот лишь кладёт маркер `/opt/mivta/data/.update-request-<время>`, а привилегированный наблюдатель `mivta-update.path` (создаётся установщиком) запускает `mivta-update.service` → `install.sh --self-update` → `systemctl restart mivta`. Через 1–2 минуты обновлённый бот сам пишет владельцу в то же сообщение: «обновлено v7.1 → v7.2». Если код не обновился — приходит предупреждение с подсказкой проверить `journalctl -u mivta-update`.
 - **Обновление, если бот владелец своего каталога** (Docker, `--no-systemd`, dev-чек-аут): бот сам делает `git fetch` + fast-forward `checkout` и перезапускается. Если новая ревизия меняет `requirements.txt` / `pyproject.toml`, бот честно просит запустить `sudo /opt/mivta/install.sh --self-update` — зависимости должен переустановить root.
 
 Отключить функцию можно полностью (`SELF_UPDATE=false`, `SELF_RESTART=false`) или только триггер systemd (переустановка с `--no-remote-update`, либо `MIVTA_UPDATE_TRIGGER=0`).
@@ -93,7 +94,7 @@ bot.example.com {
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
-# {"status": "ok", "version": "7.0"}
+# {"status": "ok", "version": "7.1"}
 ```
 
 ---
@@ -110,3 +111,7 @@ docker compose pull && docker compose up -d
 ```
 
 Контейнер работает от непривилегированного пользователя `mivta` (`UID 10001`), монтирует `./data` в `/app/data` и использует встроенный `HEALTHCHECK` (`python -m mivta --check`).
+
+### Логи в Telegram (`/logs`)
+
+Команда `/logs` (и кнопка «📋 Логи ▸» в `/status`) показывает хвост служебного журнала уровня WARNING и выше: ошибки провайдеров перевода, срабатывания circuit breaker, предупреждения конфигурации, перезапуски. Буфер живёт только в памяти процесса (кольцевой, 200 записей, строка обрезается до 300 символов) и очищается кнопкой «🧹 Очистить», поэтому на диск и в Telegram не попадает ничего лишнего: **тексты сообщений, inline-запросы и переводы в логи не пишутся по-прежнему**. Если бот только что запустился и warnings не было, `/logs` честно отвечает «Логи пусты».

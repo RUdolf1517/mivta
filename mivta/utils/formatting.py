@@ -147,6 +147,167 @@ def _crosses_verbatim_boundary(
     return False
 
 
+MAX_TRANSLATION_CHUNKS = 12
+
+# Atoms that must never be split: formatting spans `<s0>…</s0>` and verbatim tokens
+# `MIVTAK0X` / `MIVTAK1Z3X`. Everything else may break on whitespace runs.
+_PROTECTED_ATOM_RE = re.compile(
+    r"<s\d+>.*?</s\d+>"  # keep open+close formatting tags in one piece
+    r"|MIVTAK\d*(?:Z\d+)?X"  # verbatim placeholder token
+    r"|\s+"  # whitespace runs are the only safe split points
+    r"|<|[^\s<]+",  # lone '<' or a plain word
+    re.DOTALL,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TextChunks:
+    """Long text split into provider-sized chunks plus the gaps between them.
+
+    `exceeds` means the text needs more chunks than allowed, so the caller should
+    reject it instead of burning the provider quota on a wall of text.
+    """
+
+    chunks: tuple[str, ...] = ()
+    separators: tuple[str, ...] = ()
+    exceeds: bool = False
+
+
+def split_for_translation(
+    text: str,
+    max_length: int,
+    *,
+    max_chunks: int = MAX_TRANSLATION_CHUNKS,
+) -> TextChunks:
+    """Split `text` into `max_length` chunks without breaking protected placeholders.
+
+    Breaks prefer sentence and paragraph ends, fall back to word boundaries, and
+    never split inside a `<sN>…</sN>` span or a `MIVTAK…X` verbatim token.
+    `separators[i]` is the untouched whitespace run between chunk `i` and `i+1`,
+    so `join_translated_chunks` reproduces the original text exactly.
+    """
+    if max_length <= 0 or not text:
+        return TextChunks()
+    if len(text) <= max_length:
+        return TextChunks(chunks=(text,))
+
+    atoms = _PROTECTED_ATOM_RE.findall(text)
+    if "".join(atoms) != text:  # defensive: never risk corrupting the payload
+        return TextChunks(chunks=(text,))
+
+    chunks: list[str] = []
+    seps: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    pending_ws = ""
+    break_at: int | None = None
+
+    def close_chunk(following_gap: str) -> None:
+        """Emit the buffer as a chunk; `following_gap` is the gap after it."""
+        nonlocal buf, buf_len, break_at
+        if not buf:
+            return
+        chunks.append("".join(buf))
+        seps.append(following_gap)
+        buf = []
+        buf_len = 0
+        break_at = None
+
+    def stash_leading_whitespace() -> None:
+        """Keep whitespace that cannot start a chunk: attach it to the previous one.
+
+        At the very beginning of the text there is no previous chunk, so the run is
+        simply kept and prefixed to the first chunk.
+        """
+        nonlocal pending_ws
+        if pending_ws and chunks:
+            chunks[-1] = chunks[-1] + pending_ws
+            pending_ws = ""
+
+    def split_at_sentence_boundary() -> bool:
+        """Close the buffer at its last sentence/paragraph break instead of its end."""
+        nonlocal buf, buf_len, break_at
+        if break_at is None or break_at <= 0:
+            return False
+        head = buf[:break_at]
+        if len("".join(head)) < max_length // 2:
+            return False
+        gap = buf[break_at]
+        chunks.append("".join(head))
+        seps.append(gap)
+        buf = buf[break_at + 1 :]
+        buf_len = sum(len(atom) for atom in buf)
+        break_at = None
+        return True
+
+    for atom in atoms:
+        if atom.isspace():
+            pending_ws += atom
+            if len(pending_ws) > max_length:
+                close_chunk(pending_ws)
+                pending_ws = ""
+            continue
+
+        if len(atom) > max_length:
+            # A single unbreakable atom (huge URL token, unbroken run): hard-split it
+            if buf:
+                close_chunk(pending_ws)
+                pending_ws = ""
+            pieces = [atom[i : i + max_length] for i in range(0, len(atom), max_length)]
+            if pending_ws:
+                # Start of text: keep the leading whitespace glued to the first piece
+                pieces[0] = pending_ws + pieces[0]
+                pending_ws = ""
+            for piece in pieces:
+                chunks.append(piece)
+                seps.append("")
+            continue
+
+        if buf and buf_len + len(pending_ws) + len(atom) > max_length:
+            # A sentence break keeps `pending_ws` inside the new chunk: only a plain
+            # chunk close consumes it as the gap between two chunks.
+            if not split_at_sentence_boundary():
+                close_chunk(pending_ws)
+                pending_ws = ""
+            if buf and buf_len + len(pending_ws) + len(atom) > max_length:
+                close_chunk(pending_ws)
+                pending_ws = ""
+        elif not buf and len(pending_ws) + len(atom) > max_length:
+            # A word nearly as long as the limit: keep its leading whitespace by
+            # attaching it to the previous chunk instead of losing it.
+            stash_leading_whitespace()
+
+        if buf and pending_ws and (buf[-1][-1:] in ".!?:…" or "\n" in pending_ws):
+            break_at = len(buf)
+
+        buf.append(pending_ws)
+        buf.append(atom)
+        buf_len += len(pending_ws) + len(atom)
+        pending_ws = ""
+
+    close_chunk(pending_ws)
+    if chunks and pending_ws:
+        chunks[-1] = chunks[-1] + pending_ws
+    if len(chunks) > max_chunks:
+        return TextChunks(exceeds=True)
+    if chunks:
+        seps = seps[: len(chunks) - 1]
+    return TextChunks(chunks=tuple(chunks), separators=tuple(seps))
+
+
+def join_translated_chunks(
+    pieces: Sequence[str],
+    separators: Sequence[str],
+) -> str:
+    """Reassemble translated chunks using the original (untranslated) gaps."""
+    out: list[str] = []
+    for index, piece in enumerate(pieces):
+        out.append(piece)
+        if index < len(separators):
+            out.append(separators[index])
+    return "".join(out)
+
+
 def _compile_glossary_pattern(glossary: Sequence[str]) -> re.Pattern[str] | None:
     cleaned = [term.strip() for term in glossary if term and term.strip()]
     if not cleaned:

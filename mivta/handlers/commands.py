@@ -1387,15 +1387,23 @@ def _build_owner_status_keyboard(
                 callback_data="svc:check",
             )
         )
-    if self_restart:
-        service_row.append(
-            InlineKeyboardButton(
-                text="🔄 Restart" if lang == "en" else "🔄 Перезапустить",
-                callback_data="svc:restart",
-            )
+    service_row.append(
+        InlineKeyboardButton(
+            text="📋 Logs ▸" if lang == "en" else "📋 Логи ▸",
+            callback_data="svc:logs",
         )
+    )
     if service_row:
         rows.append(service_row)
+    if self_restart:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Restart" if lang == "en" else "🔄 Перезапустить",
+                    callback_data="svc:restart",
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1522,19 +1530,17 @@ def _render_owner_status_html(
 
 
 def _owner_setup_hint_html(lang: str, uid: int, command: str) -> str:
-    """Tell an unconfigured caller their own Telegram ID (and nothing else)."""
+    """Tell an unconfigured caller their own Telegram ID (and nothing about the server)."""
     if lang == "en":
         return (
             f"🔒 <b>{escape(command)} is not configured yet.</b>\n\n"
             f"Your numeric Telegram ID: <code>{uid}</code>\n"
-            f"Add <code>OWNER_ID={uid}</code> to <code>.env</code> "
-            "(or <code>/etc/mivta/mivta.env</code>) and restart the service."
+            f"Add <code>OWNER_ID={uid}</code> and restart the service."
         )
     return (
         f"🔒 <b>Команда {escape(command)} ещё не настроена.</b>\n\n"
         f"Ваш числовой Telegram ID: <code>{uid}</code>\n"
-        f"Добавьте <code>OWNER_ID={uid}</code> в <code>.env</code> "
-        "(или <code>/etc/mivta/mivta.env</code>) и перезапустите сервис."
+        f"Добавьте <code>OWNER_ID={uid}</code> и перезапустите сервис."
     )
 
 
@@ -1849,6 +1855,101 @@ def _manual_update_text(lang: str, plan: UpdatePlan) -> str:
     )
 
 
+LOG_TAIL_LIMIT = 25
+
+
+def _render_logs_html(
+    lang: str,
+    entries: tuple[Any, ...],
+    *,
+    total: int,
+) -> str:
+    """Render the tail of the in-memory log buffer for the owner (HTML-safe)."""
+    en = lang == "en"
+    if not entries:
+        return (
+            "📋 <b>Logs are empty</b>\n\n"
+            "No WARNING/ERROR records since startup — the service is running clean."
+            if en
+            else "📋 <b>Логи пусты</b>\n\n"
+            "С момента запуска не было ни одной записи WARNING/ERROR — сервис работает чисто."
+        )
+
+    body = "\n".join(escape(entry.render()) for entry in entries)
+    head = (
+        f"📋 <b>Logs</b> · last {len(entries)} of {total} (WARNING+)\n\n"
+        if en
+        else f"📋 <b>Логи</b> · последние {len(entries)} из {total} (WARNING+)\n\n"
+    )
+    return f"{head}<code>{body}</code>"
+
+
+def _build_logs_keyboard(lang: str) -> InlineKeyboardMarkup:
+    en = lang == "en"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Refresh" if en else "🔄 Обновить",
+                    callback_data="svc:logs",
+                ),
+                InlineKeyboardButton(
+                    text="🧹 Clear" if en else "🧹 Очистить",
+                    callback_data="svc:logs_clear",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Status" if en else "📊 Статус",
+                    callback_data="svc:status",
+                ),
+                InlineKeyboardButton(
+                    text="✖️ Close" if en else "✖️ Закрыть",
+                    callback_data="svc:cancel",
+                ),
+            ],
+        ]
+    )
+
+
+async def cmd_logs(
+    message: Message,
+    db: Database,
+    config: Config,
+    log_tail: Any = None,
+) -> None:
+    """Owner-only `/logs`: tail of recent WARNING+ records from RAM."""
+    if message.from_user is None:
+        return
+    uid = message.from_user.id
+    settings = await db.get_user_settings(uid)
+    lang = _ui_for(message.from_user, settings, config)
+
+    if not config.owner_ids:
+        await message.answer(
+            _owner_setup_hint_html(lang, uid, "/logs"),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if uid not in config.owner_ids:
+        await message.answer(_owner_denied_text(lang))
+        return
+    if log_tail is None:
+        await message.answer(
+            "Logs are not available in this runtime."
+            if lang == "en"
+            else "Логи недоступны в этом режиме запуска."
+        )
+        return
+
+    entries = log_tail.entries(LOG_TAIL_LIMIT)
+    await message.answer(
+        _render_logs_html(lang, entries, total=len(log_tail)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_build_logs_keyboard(lang),
+    )
+
+
 async def cmd_update(
     message: Message,
     db: Database,
@@ -1949,6 +2050,7 @@ async def handle_owner_service_callback(
     cache: TranslationCache | None = None,
     metrics: RuntimeMetrics | None = None,
     inflight: dict[bytes, Any] | None = None,
+    log_tail: Any = None,
     bot_username: str = "BotUsername",
 ) -> None:
     """Owner-only `/update` & `/restart` actions (`svc:update`, `svc:restart`, ...)."""
@@ -1971,6 +2073,29 @@ async def handle_owner_service_callback(
             with contextlib.suppress(TelegramBadRequest):
                 await message.edit_reply_markup(reply_markup=None)
         await callback.answer("Ok" if lang == "en" else "Ок")
+        return
+
+    if action in ("logs", "logs_clear"):
+        if message is None or log_tail is None:
+            await callback.answer(
+                "Logs are unavailable." if lang == "en" else "Логи недоступны.",
+                show_alert=True,
+            )
+            return
+        if action == "logs_clear":
+            log_tail.clear()
+        entries = log_tail.entries(LOG_TAIL_LIMIT)
+        await _edit_service_message(
+            message,
+            _render_logs_html(lang, entries, total=len(log_tail)),
+            reply_markup=_build_logs_keyboard(lang),
+        )
+        toast = (
+            ("Cleared" if lang == "en" else "Очищено")
+            if action == "logs_clear"
+            else ("Updated" if lang == "en" else "Обновил")
+        )
+        await callback.answer(toast)
         return
 
     if action == "status":
@@ -2140,6 +2265,7 @@ def build_commands_router() -> Router:
     router.message.register(cmd_status, Command("status"), F.chat.type == "private")
     router.message.register(cmd_update, Command("update", "upgrade"), F.chat.type == "private")
     router.message.register(cmd_restart, Command("restart"), F.chat.type == "private")
+    router.message.register(cmd_logs, Command("logs"), F.chat.type == "private")
     router.message.register(cmd_lang, Command("lang"))
     router.message.register(cmd_swap, Command("swap"))
     router.message.register(cmd_langs, Command("langs"))
