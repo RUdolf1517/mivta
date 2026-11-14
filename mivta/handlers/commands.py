@@ -85,41 +85,85 @@ def _format_settings_text(
     bot_username: str,
     ui_lang: str,
 ) -> str:
-    src_label = language_label(settings.source_lang, ui_lang=ui_lang)
-    tgt_label = language_label(settings.target_lang, ui_lang=ui_lang)
-    swap_str = _format_swap_lang(settings.swap_lang, ui_lang)
-    st_label = style_label(settings.style, ui_lang)
+    """Compact one-screen state: direction + style + extras, details live in /help."""
+    is_en = ui_lang == "en"
+    if settings.swap_lang and settings.source_lang == AUTO_LANG:
+        direction = f"{settings.target_lang.upper()} ⇄ {settings.swap_lang.upper()}"
+    elif settings.source_lang == AUTO_LANG:
+        auto_lbl = "Auto" if is_en else "Авто"
+        direction = f"{auto_lbl} → {settings.target_lang.upper()}"
+    else:
+        direction = f"{settings.source_lang.upper()} → {settings.target_lang.upper()}"
+
+    st_label = style_label(settings.style, ui_lang).capitalize()
     extra_str = _format_extra_langs(settings.extra_langs, ui_lang)
 
-    if ui_lang == "en":
+    if is_en:
         return (
             "mivta Translation Settings\n\n"
-            f"• Source language: {src_label}\n"
-            f"• Target language: {tgt_label}\n"
-            f"• Auto-swap pair (⇄): {swap_str}\n"
-            f"• Extra Inline cards: {extra_str}\n"
-            f"• Style: {st_label}\n\n"
-            "Inline Mode (any chat):\n"
-            f"• @{bot_username} Hello, how are you?\n"
-            f"• @{bot_username} >de text · en>pl text · !formal text\n\n"
-            "Secretary Mode / Chat Automation (no 'via @bot' label):\n"
-            "• > Hello, how are you? (messages & media captions)\n"
-            "• >de text · en>pl !formal text"
+            f"🌍 {direction} · {st_label}\n"
+            f"• Extra card languages: {extra_str}\n\n"
+            f"Quick filters in @{bot_username}: >de text · ru>en text · !formal text\n"
+            "Changes below apply instantly; tap «How to use» for the full guide."
         )
 
     return (
         "Настройки перевода mivta\n\n"
-        f"• Исходный язык: {src_label}\n"
-        f"• Язык перевода: {tgt_label}\n"
-        f"• Авто-смена (⇄): {swap_str}\n"
-        f"• Доп. языки Inline: {extra_str}\n"
-        f"• Стиль: {st_label}\n\n"
-        "Inline Mode (любой чат):\n"
+        f"🌍 {direction} · {st_label}\n"
+        f"• Доп. языки карточек: {extra_str}\n\n"
+        f"Быстрые фильтры в @{bot_username}: >de текст · ru>en текст · !formal текст\n"
+        "Всё ниже меняется одним нажатием; полная справка — по кнопке «Как пользоваться»."
+    )
+
+
+def _format_help_text(settings: UserSettings, bot_username: str, ui_lang: str) -> str:
+    """Full usage guide (kept out of /settings so the panel stays one screen tall)."""
+    if ui_lang == "en":
+        return (
+            "mivta — how to use\n\n"
+            "1. Inline Mode — any chat, group, or channel:\n"
+            f"• @{bot_username} Hello, how are you?\n"
+            f"• @{bot_username} >de text · en>pl text · !formal text\n\n"
+            "2. Chat Automation (1-on-1 DMs, no 'via @bot' label):\n"
+            "• Connect the bot in Telegram Settings → Chat Automation\n"
+            "• > Hello, how are you? (messages and media captions)\n"
+            "• >de text · ru>pl !formal text\n\n"
+            "3. Groups: add the bot as admin with 'Delete messages' and write '> text'.\n\n"
+            "Commands: /lang · /swap · /langs · /source · /style · /ui · /privacy · /reset"
+        )
+
+    return (
+        "mivta — как пользоваться\n\n"
+        "1. Инлайн-режим — любой чат, группа или канал:\n"
         f"• @{bot_username} Привет, как дела?\n"
-        f"• @{bot_username} >de текст · ru>en текст · !formal текст\n\n"
-        "Secretary Mode / Автоматизация чатов (без via @bot):\n"
-        "• > Привет, как дела? (текст и подписи к фото/файлам)\n"
-        "• >de текст · ru>pl !formal текст"
+        f"• @{bot_username} >de текст · ru>pl текст · !formal текст\n\n"
+        "2. Автоматизация чатов (личка 1-на-1, без метки via @bot):\n"
+        "• Подключите бота в «Настройки → Автоматизация чатов» (Secretary Mode)\n"
+        "• > Привет, как дела? (сообщения и подписи к фото/файлам)\n"
+        "• >de текст · ru>pl !formal текст\n\n"
+        "3. Группы: добавьте бота админом с правом «Удаление сообщений» и пишите «> текст».\n\n"
+        "Команды: /lang · /swap · /langs · /source · /style · /ui · /privacy · /reset"
+    )
+
+
+def _help_keyboard(*, ui_lang: str) -> InlineKeyboardMarkup:
+    """Back-to-settings + jump straight into the inline input field."""
+    is_en = ui_lang == "en"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="◂ Settings" if is_en else "◂ Настройки",
+                    callback_data="cfg:main",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Translate in chat ▸" if is_en else "Перевести в чате ▸",
+                    switch_inline_query="",
+                )
+            ],
+        ]
     )
 
 
@@ -260,6 +304,16 @@ def _main_settings_keyboard(
                 )
             ]
         )
+
+    # Full guide lives behind one button so the panel stays one screen tall
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="ℹ️ How to use" if is_en else "ℹ️ Как пользоваться",
+                callback_data="cfg:help",
+            )
+        ]
+    )
 
     # UI language toggle + Jump straight back to inline input in any chat
     next_ui = "ru" if is_en else "en"
@@ -425,7 +479,7 @@ def _extra_menu_title(settings: UserSettings, ui_lang: str) -> str:
             f"Primary target: {settings.target_lang.upper()} · Extra: {extra_str}"
         )
     return (
-        f"Дополнительные языки для карточек Inline Mode (до {MAX_INLINE_EXTRA_LANGS}):\n"
+        f"Дополнительные языки карточек в инлайн-режиме (до {MAX_INLINE_EXTRA_LANGS}):\n"
         f"Основной язык: {settings.target_lang.upper()} · Доп.: {extra_str}"
     )
 
@@ -492,12 +546,12 @@ async def cmd_start(
         )
     else:
         text = (
-            "mivta — переводчик для Telegram Inline & Secretary Mode.\n\n"
+            "mivta — переводчик для Telegram: инлайн-режим и автоматизация чатов.\n\n"
             "Бот не переводит пересланные или личные сообщения здесь. "
             "Чтобы перевести текст, вызовите бота прямо в поле ввода любого чата:\n\n"
             f"@{bot_username} Привет, как дела?\n\n"
             "Выберите готовый перевод во всплывающем окне — и он отправится от вашего имени.\n\n"
-            "Ниже можно настроить язык по умолчанию, ⇄ авто-смену, доп. карточки и стиль."
+            "Ниже можно настроить язык по умолчанию, ⇄ авто-смену, доп. языки карточек и стиль."
         )
     await message.answer(text, reply_markup=kb)
 
@@ -519,6 +573,23 @@ async def cmd_settings(
             ui_lang=ui,
             telegram_lang_code=message.from_user.language_code,
         ),
+    )
+
+
+async def cmd_help(
+    message: Message,
+    config: Config,
+    db: Database,
+    bot_username: str = "BotUsername",
+) -> None:
+    """Full usage guide with a one-tap jump into the settings panel."""
+    if message.from_user is None:
+        return
+    settings = await db.get_user_settings(message.from_user.id)
+    ui = _ui_for(message.from_user, settings, config)
+    await message.answer(
+        _format_help_text(settings, bot_username, ui),
+        reply_markup=_help_keyboard(ui_lang=ui),
     )
 
 
@@ -968,6 +1039,15 @@ async def handle_settings_callback(
         await callback.answer()
         return
 
+    if action == "help":
+        await _edit_safely(
+            callback,
+            _format_help_text(settings, bot_username, ui),
+            _help_keyboard(ui_lang=ui),
+        )
+        await callback.answer()
+        return
+
     if action in ("tgt_menu", "src_menu", "swap_menu"):
         page = 2 if arg == "2" else 1
         if action == "tgt_menu":
@@ -1210,7 +1290,7 @@ async def reject_direct_messages(
                     text=(
                         "Translate in chat (Inline Mode)"
                         if is_en
-                        else "Перевести в чате (Inline Mode)"
+                        else "Перевести в чате (инлайн-режим)"
                     ),
                     switch_inline_query="",
                 )
@@ -1229,7 +1309,7 @@ async def reject_direct_messages(
             f"Type in the input field of any chat:\n@{bot_username} your text\n\n"
             "Use /settings to change languages or style."
             if is_en
-            else "mivta работает только в Inline Mode — пересылать сообщения "
+            else "mivta работает только в инлайн-режиме — пересылать сообщения "
             "или отправлять аудио не нужно.\n\n"
             f"Введите в поле ввода любого чата:\n@{bot_username} ваш текст\n\n"
             "Для изменения языка или стиля используйте /settings."
@@ -1278,6 +1358,8 @@ def _build_owner_status_keyboard(
     *,
     has_cooldowns: bool,
     cache_enabled: bool,
+    self_update: bool = True,
+    self_restart: bool = True,
 ) -> InlineKeyboardMarkup:
     refresh_lbl = "🔄 Refresh" if lang == "en" else "🔄 Обновить"
     reset_cd_lbl = "⚡️ Reset cooldowns" if lang == "en" else "⚡️ Сбросить cooldown"
@@ -1295,7 +1377,37 @@ def _build_owner_status_keyboard(
         )
     if action_row:
         rows.append(action_row)
+
+    # Service actions live in the same panel: no need to remember /update or /restart
+    service_row: list[InlineKeyboardButton] = []
+    if self_update:
+        service_row.append(
+            InlineKeyboardButton(
+                text="🛠 Updates ▸" if lang == "en" else "🛠 Обслуживание ▸",
+                callback_data="svc:check",
+            )
+        )
+    if self_restart:
+        service_row.append(
+            InlineKeyboardButton(
+                text="🔄 Restart" if lang == "en" else "🔄 Перезапустить",
+                callback_data="svc:restart",
+            )
+        )
+    if service_row:
+        rows.append(service_row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _service_state_line(lang: str, config: Config) -> str:
+    """One line showing whether update/restart from Telegram are enabled."""
+    on = "on" if lang == "en" else "вкл"
+    off = "off" if lang == "en" else "выкл"
+    updates = on if config.self_update else off
+    restarts = on if config.self_restart else off
+    if lang == "en":
+        return f"• Update from Telegram: <b>{updates}</b> · Restart: <b>{restarts}</b>"
+    return f"• Обновление из Telegram: <b>{updates}</b> · Перезапуск: <b>{restarts}</b>"
 
 
 def _render_owner_status_html(
@@ -1382,7 +1494,9 @@ def _render_owner_status_html(
             "🧠 <b>RAM cache &amp; concurrency</b>\n"
             f"{cache_line}\n"
             f"• In-flight translations: <b>{inflight_count} / "
-            f"{config.max_concurrent_translations}</b>"
+            f"{config.max_concurrent_translations}</b>\n\n"
+            "🛠 <b>Service</b>\n"
+            f"{_service_state_line(lang, config)}"
         )
 
     return (
@@ -1401,7 +1515,9 @@ def _render_owner_status_html(
         "🧠 <b>RAM-кэш и нагрузка</b>\n"
         f"{cache_line}\n"
         f"• Переводов в полёте: <b>{inflight_count} / "
-        f"{config.max_concurrent_translations}</b>"
+        f"{config.max_concurrent_translations}</b>\n\n"
+        "🛠 <b>Обслуживание</b>\n"
+        f"{_service_state_line(lang, config)}"
     )
 
 
@@ -1458,6 +1574,31 @@ async def cmd_status(
         await message.answer(_owner_denied_text(lang))
         return
 
+    text, kb = await _owner_status_view(
+        lang=lang,
+        bot_username=bot_username,
+        config=config,
+        translator=translator,
+        db=db,
+        cache=cache,
+        metrics=metrics,
+        inflight=inflight,
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def _owner_status_view(
+    *,
+    lang: str,
+    bot_username: str,
+    config: Config,
+    translator: Translator,
+    db: Database,
+    cache: TranslationCache | None = None,
+    metrics: RuntimeMetrics | None = None,
+    inflight: dict[bytes, Any] | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Render the owner dashboard (shared by `/status`, `ost:*` and `svc:status`)."""
     statuses = translator.get_provider_statuses()
     db_stats = await db.get_stats()
     has_cd = any(st.cooldown_remaining > 0.0 for st in statuses)
@@ -1475,8 +1616,10 @@ async def cmd_status(
         lang,
         has_cooldowns=has_cd,
         cache_enabled=bool(cache is not None and cache.enabled),
+        self_update=config.self_update,
+        self_restart=config.self_restart,
     )
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    return text, kb
 
 
 async def handle_owner_status_callback(
@@ -1512,23 +1655,15 @@ async def handle_owner_status_callback(
         toast = "RAM cache cleared" if lang == "en" else "RAM-кэш очищен"
 
     if isinstance(callback.message, Message):
-        statuses = translator.get_provider_statuses()
-        db_stats = await db.get_stats()
-        has_cd = any(st.cooldown_remaining > 0.0 for st in statuses)
-        text = _render_owner_status_html(
+        text, kb = await _owner_status_view(
             lang=lang,
             bot_username=bot_username,
             config=config,
-            statuses=statuses,
-            db_stats=db_stats,
+            translator=translator,
+            db=db,
             cache=cache,
             metrics=metrics,
-            inflight_count=len(inflight) if inflight is not None else 0,
-        )
-        kb = _build_owner_status_keyboard(
-            lang,
-            has_cooldowns=has_cd,
-            cache_enabled=bool(cache is not None and cache.enabled),
+            inflight=inflight,
         )
         try:
             await callback.message.edit_text(
@@ -1571,12 +1706,14 @@ def _build_service_keyboard(
         update_lbl = "⬆️ Update & restart"
         restart_lbl = "🔄 Restart"
         recheck_lbl = "🔎 Check again"
+        status_lbl = "📊 Status"
         confirm_lbl = "✅ Yes, restart"
         cancel_lbl = "✖️ Close"
     else:
         update_lbl = "⬆️ Обновить и перезапустить"
         restart_lbl = "🔄 Перезапустить"
         recheck_lbl = "🔎 Проверить снова"
+        status_lbl = "📊 Статус"
         confirm_lbl = "✅ Да, перезапустить"
         cancel_lbl = "✖️ Закрыть"
 
@@ -1592,7 +1729,12 @@ def _build_service_keyboard(
                 InlineKeyboardButton(text=recheck_lbl, callback_data="svc:check"),
             ]
         )
-    rows.append([InlineKeyboardButton(text=cancel_lbl, callback_data="svc:cancel")])
+    rows.append(
+        [
+            InlineKeyboardButton(text=status_lbl, callback_data="svc:status"),
+            InlineKeyboardButton(text=cancel_lbl, callback_data="svc:cancel"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1802,7 +1944,12 @@ async def handle_owner_service_callback(
     callback: CallbackQuery,
     db: Database,
     config: Config,
+    translator: Translator | None = None,
     restart: RestartController | None = None,
+    cache: TranslationCache | None = None,
+    metrics: RuntimeMetrics | None = None,
+    inflight: dict[bytes, Any] | None = None,
+    bot_username: str = "BotUsername",
 ) -> None:
     """Owner-only `/update` & `/restart` actions (`svc:update`, `svc:restart`, ...)."""
     uid = callback.from_user.id
@@ -1824,6 +1971,24 @@ async def handle_owner_service_callback(
             with contextlib.suppress(TelegramBadRequest):
                 await message.edit_reply_markup(reply_markup=None)
         await callback.answer("Ok" if lang == "en" else "Ок")
+        return
+
+    if action == "status":
+        if message is None or translator is None:
+            await callback.answer()
+            return
+        text, kb = await _owner_status_view(
+            lang=lang,
+            bot_username=bot_username,
+            config=config,
+            translator=translator,
+            db=db,
+            cache=cache,
+            metrics=metrics,
+            inflight=inflight,
+        )
+        await _edit_service_message(message, text, reply_markup=kb)
+        await callback.answer()
         return
 
     if action == "check":
@@ -1970,7 +2135,8 @@ def build_commands_router() -> Router:
     """Create a fresh Router bound to command and settings callback handlers."""
     router = Router(name="commands")
     router.message.register(cmd_start, CommandStart())
-    router.message.register(cmd_settings, Command("help", "settings"))
+    router.message.register(cmd_settings, Command("settings"))
+    router.message.register(cmd_help, Command("help"))
     router.message.register(cmd_status, Command("status"), F.chat.type == "private")
     router.message.register(cmd_update, Command("update", "upgrade"), F.chat.type == "private")
     router.message.register(cmd_restart, Command("restart"), F.chat.type == "private")

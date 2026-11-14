@@ -59,20 +59,20 @@ BOT_COMMANDS_EN: list[BotCommand] = [
     BotCommand(command="ui", description="Switch bot interface language (EN/RU)"),
     BotCommand(command="privacy", description="Privacy policy & data handling"),
     BotCommand(command="reset", description="Delete saved preferences"),
-    BotCommand(command="help", description="How to use Inline & Secretary Mode"),
+    BotCommand(command="help", description="How to use Inline Mode & Chat Automation"),
 ]
 
 BOT_COMMANDS_RU: list[BotCommand] = [
     BotCommand(command="settings", description="Настройки языка, авто-смены и стиля"),
     BotCommand(command="lang", description="Язык перевода по умолчанию"),
     BotCommand(command="swap", description="Двусторонняя авто-смена пары языков"),
-    BotCommand(command="langs", description="Доп. языки карточек в Inline Mode"),
+    BotCommand(command="langs", description="Доп. языки карточек в инлайн-режиме"),
     BotCommand(command="source", description="Исходный язык или автоопределение"),
     BotCommand(command="style", description="Стиль: neutral, casual, formal"),
     BotCommand(command="ui", description="Язык интерфейса бота (RU/EN)"),
     BotCommand(command="privacy", description="Политика конфиденциальности"),
     BotCommand(command="reset", description="Удалить сохранённые настройки"),
-    BotCommand(command="help", description="Как пользоваться Inline и Secretary Mode"),
+    BotCommand(command="help", description="Как пользоваться инлайн-режимом и чатами"),
 ]
 
 GROUP_ADMIN_COMMANDS_EN: list[BotCommand] = [
