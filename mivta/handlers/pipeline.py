@@ -16,6 +16,11 @@ from mivta.translator.base import (
     deduplicate_styles,
 )
 from mivta.utils.cache import TranslationCache
+from mivta.utils.formatting import (
+    MAX_TRANSLATION_CHUNKS,
+    join_translated_chunks,
+    split_for_translation,
+)
 from mivta.utils.ratelimit import RateLimiter
 
 TELEGRAM_MAX_MESSAGE_LEN = 4096
@@ -180,6 +185,92 @@ async def execute_translation(
         cache=cache,
         concurrency_sem=concurrency_sem,
         inflight=inflight,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TextTooLong:
+    """Returned when the text needs more chunks than the configured limit allows."""
+
+    length: int
+    max_chunks: int
+
+
+async def execute_chunked_translation(
+    *,
+    user_id: int,
+    request: TranslationRequest,
+    translator: Translator,
+    cache: TranslationCache,
+    rate_limiter: RateLimiter,
+    concurrency_sem: asyncio.Semaphore,
+    inflight: dict[bytes, InflightEntry],
+    max_length: int,
+    max_chunks: int = MAX_TRANSLATION_CHUNKS,
+) -> TranslationResult | RateLimitedOutcome | TextTooLong:
+    """Translate a long text by provider-sized chunks (one rate-limit token total)."""
+    text = request.text
+    if max_length <= 0 or len(text) <= max_length:
+        return await execute_translation(
+            user_id=user_id,
+            request=request,
+            translator=translator,
+            cache=cache,
+            rate_limiter=rate_limiter,
+            concurrency_sem=concurrency_sem,
+            inflight=inflight,
+        )
+
+    chunks = split_for_translation(text, max_length, max_chunks=max_chunks)
+    if chunks.exceeds or len(chunks.chunks) < 2:
+        if chunks.exceeds:
+            return TextTooLong(length=len(text), max_chunks=max_chunks)
+        return await execute_translation(
+            user_id=user_id,
+            request=request,
+            translator=translator,
+            cache=cache,
+            rate_limiter=rate_limiter,
+            concurrency_sem=concurrency_sem,
+            inflight=inflight,
+        )
+
+    results: list[TranslationResult] = []
+    for index, chunk in enumerate(chunks.chunks):
+        chunk_request = replace(request, text=chunk)
+        if index == 0:
+            # Only the first chunk consumes a rate-limit token: one message = one request
+            outcome = await execute_translation(
+                user_id=user_id,
+                request=chunk_request,
+                translator=translator,
+                cache=cache,
+                rate_limiter=rate_limiter,
+                concurrency_sem=concurrency_sem,
+                inflight=inflight,
+            )
+        else:
+            outcome = await _singleflight_translate(
+                request=chunk_request,
+                translator=translator,
+                cache=cache,
+                concurrency_sem=concurrency_sem,
+                inflight=inflight,
+            )
+        if isinstance(outcome, RateLimitedOutcome):
+            return outcome
+        results.append(outcome)
+
+    first = results[0]
+    return TranslationResult(
+        translated_text=join_translated_chunks(
+            [item.translated_text for item in results],
+            chunks.separators,
+        ),
+        source_lang=first.source_lang,
+        target_lang=first.target_lang,
+        provider=f"{first.provider}×{len(results)}",
+        style=first.style,
     )
 
 

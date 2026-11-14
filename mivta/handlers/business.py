@@ -17,7 +17,8 @@ from mivta.handlers.pipeline import (
     TELEGRAM_MAX_MESSAGE_LEN,
     InflightEntry,
     RateLimitedOutcome,
-    execute_translation,
+    TextTooLong,
+    execute_chunked_translation,
 )
 from mivta.translator.base import (
     TranslationRequest,
@@ -211,10 +212,9 @@ async def handle_business_message(
     if not parsed.text:
         return
 
-    max_allowed = min(
-        config.max_text_length,
-        TELEGRAM_MAX_CAPTION_LEN if is_caption else TELEGRAM_MAX_MESSAGE_LEN,
-    )
+    # Long messages are translated in chunks of `MAX_TEXT_LENGTH` and stitched back
+    # together, so only Telegram's own length limit still applies.
+    max_allowed = TELEGRAM_MAX_CAPTION_LEN if is_caption else TELEGRAM_MAX_MESSAGE_LEN
     if len(parsed.text) > max_allowed:
         await _notify_owner_privately(
             bot,
@@ -264,7 +264,7 @@ async def handle_business_message(
             swap_lang=provider_swap,
         )
         try:
-            outcome = await execute_translation(
+            outcome = await execute_chunked_translation(
                 user_id=user_id,
                 request=request,
                 translator=translator,
@@ -272,6 +272,7 @@ async def handle_business_message(
                 rate_limiter=rate_limiter,
                 concurrency_sem=concurrency_sem,
                 inflight=inflight,
+                max_length=config.max_text_length,
             )
         except TranslatorError as exc:
             logger.warning(
@@ -300,6 +301,20 @@ async def handle_business_message(
                     f"mivta: rate limit reached, please wait {outcome.retry_after:.1f} s."
                     if is_en
                     else f"mivta: превышен лимит запросов, подождите {outcome.retry_after:.1f} с."
+                ),
+            )
+            return
+        if isinstance(outcome, TextTooLong):
+            await _notify_owner_privately(
+                bot,
+                user_chat_id,
+                (
+                    f"mivta: message is too long to translate ({outcome.length} characters, "
+                    f"limit {outcome.max_chunks} parts). Shorten it and send again."
+                    if is_en
+                    else f"mivta: сообщение слишком длинное для перевода ({outcome.length} "
+                    f"символов, лимит {outcome.max_chunks} частей). "
+                    "Сократите его и отправьте снова."
                 ),
             )
             return

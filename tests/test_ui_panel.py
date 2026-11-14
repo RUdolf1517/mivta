@@ -168,6 +168,64 @@ async def test_settings_panel_is_one_screen_and_help_is_separate(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_logs_command_is_wired_into_the_dispatcher(tmp_path: Path) -> None:
+    """`/logs` reaches the handler through workflow data, including its tail buffer."""
+    from mivta.utils.logtail import LogTail
+
+    db = Database(tmp_path / "logs-ui.db")
+    await db.connect()
+    try:
+        cfg = Config(bot_token="123456:ABCDEF", default_ui_lang="ru", owner_ids=(555,))
+        tail = LogTail(capacity=10)
+        dp = create_dispatcher(
+            config=cfg,
+            db=db,
+            translator=StubTranslator(),
+            bot_username="mivtabot",
+            log_tail=tail,
+        )
+        bot = CapturingBot()
+
+        # 1. Empty buffer -> the "all clean" message
+        await dp.feed_update(bot, _msg_update(1, user_id=555, text="/logs"))
+        clean = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "пусты" in clean.text
+
+        # 2. A warning shows up in the owner's chat, with refresh/clear buttons
+        import logging
+
+        logger = logging.getLogger("mivta.test.tail")
+        logger.propagate = False
+        logger.addHandler(tail)
+        try:
+            logger.warning("provider timeout")
+        finally:
+            logger.removeHandler(tail)
+
+        bot.calls.clear()
+        await dp.feed_update(bot, _msg_update(2, user_id=555, text="/logs"))
+        logs = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "provider timeout" in logs.text
+        rows = _button_rows(logs.reply_markup)
+        assert "svc:logs" in rows and "svc:logs_clear" in rows
+
+        # 3. «🧹 Очистить» empties the buffer and re-renders the same message
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(3, user_id=555, data="svc:logs_clear"))
+        cleared = [c for c in bot.calls if isinstance(c, EditMessageText)][-1]
+        assert "пусты" in cleared.text
+        assert len(tail) == 0
+
+        # 4. A non-owner gets nothing but the denial text
+        bot.calls.clear()
+        await dp.feed_update(bot, _msg_update(4, user_id=777, text="/logs"))
+        denied = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "Доступ запрещён" in denied.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_owner_panel_unifies_status_and_service(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)

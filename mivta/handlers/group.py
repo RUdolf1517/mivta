@@ -29,7 +29,8 @@ from mivta.handlers.pipeline import (
     TELEGRAM_MAX_MESSAGE_LEN,
     InflightEntry,
     RateLimitedOutcome,
-    execute_translation,
+    TextTooLong,
+    execute_chunked_translation,
 )
 from mivta.translator.base import (
     TranslationRequest,
@@ -1255,7 +1256,9 @@ def build_group_router() -> Router:
         sep = ":\n" if "\n" in prelim.text else ": "
         header_prefix = f"{author_name}{sep}"
         body_budget = telegram_limit - len(header_prefix)
-        max_allowed = min(config.max_text_length, body_budget)
+        # Long messages are split into `MAX_TEXT_LENGTH` chunks by the pipeline and
+        # stitched back together, so the only hard limit is Telegram's own length.
+        max_allowed = body_budget
         if max_allowed <= 0 or len(prelim.text) > max_allowed:
             return
 
@@ -1304,7 +1307,7 @@ def build_group_router() -> Router:
                 swap_lang=provider_swap,
             )
             try:
-                outcome = await execute_translation(
+                outcome = await execute_chunked_translation(
                     user_id=sender_uid,
                     request=request,
                     translator=translator,
@@ -1312,6 +1315,7 @@ def build_group_router() -> Router:
                     rate_limiter=rate_limiter,
                     concurrency_sem=concurrency_sem,
                     inflight=inflight,
+                    max_length=config.max_text_length,
                 )
             except TranslatorError as exc:
                 logger.warning(
@@ -1321,7 +1325,7 @@ def build_group_router() -> Router:
                 )
                 return
 
-            if isinstance(outcome, RateLimitedOutcome):
+            if isinstance(outcome, (RateLimitedOutcome, TextTooLong)):
                 return
 
             restored = restore_formatted_text(
