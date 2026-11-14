@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 from aiogram.types import MessageEntity
+
+from mivta.utils.utf16 import U16OffsetMap, has_astral_chars
 
 _VERBATIM_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -52,6 +56,9 @@ def utf16_len(text: str) -> int:
 
 def build_utf16_offsets(text: str) -> list[int]:
     """Build cumulative UTF-16 code-unit offsets for each Python character index."""
+    if not has_astral_chars(text):
+        # BMP-only: one code point is exactly one UTF-16 unit
+        return list(range(len(text) + 1))
     offsets = [0] * (len(text) + 1)
     acc = 0
     for idx, ch in enumerate(text):
@@ -131,8 +138,36 @@ def _choose_token_prefix(text: str) -> str:
     return candidate
 
 
-def _overlaps_any(start: int, end: int, intervals: list[tuple[int, int]]) -> bool:
-    return any(start < iv_end and iv_start < end for iv_start, iv_end in intervals)
+class _IntervalSet:
+    """Sorted non-overlapping [start, end) intervals with O(log n) overlap checks.
+
+    `prepare_text_for_translation` collects verbatim spans (links, code, mentions,
+    glossary hits) and tests every new candidate against all of them. A long
+    message can hold dozens of spans, so a linear scan per candidate costs
+    O(n^2); keeping the intervals sorted makes each test a bisect.
+    """
+
+    __slots__ = ("_starts", "_ends")
+
+    def __init__(self) -> None:
+        self._starts: list[int] = []
+        self._ends: list[int] = []
+
+    def add(self, start: int, end: int) -> None:
+        idx = bisect_left(self._starts, start)
+        self._starts.insert(idx, start)
+        self._ends.insert(idx, end)
+
+    def overlaps(self, start: int, end: int) -> bool:
+        # Intervals never overlap each other, so only the neighbours of the
+        # insertion point can intersect [start, end).
+        idx = bisect_left(self._starts, start)
+        if idx > 0 and self._ends[idx - 1] > start:
+            return True
+        return idx < len(self._starts) and self._starts[idx] < end
+
+    def __len__(self) -> int:
+        return len(self._starts)
 
 
 def _crosses_verbatim_boundary(
@@ -308,7 +343,8 @@ def join_translated_chunks(
     return "".join(out)
 
 
-def _compile_glossary_pattern(glossary: Sequence[str]) -> re.Pattern[str] | None:
+@lru_cache(maxsize=32)
+def _compile_glossary_pattern(glossary: tuple[str, ...]) -> re.Pattern[str] | None:
     cleaned = [term.strip() for term in glossary if term and term.strip()]
     if not cleaned:
         return None
@@ -344,21 +380,20 @@ def prepare_text_for_translation(
             has_xml_style_tags=False,
         )
 
-    u16_offsets = build_utf16_offsets(text)
-    u16_to_py = {u16: py_i for py_i, u16 in enumerate(u16_offsets)}
+    u16_map = U16OffsetMap(text)
 
     verbatims: list[_VerbatimSpan] = []
-    occupied: list[tuple[int, int]] = []
+    occupied = _IntervalSet()
     candidate_styles: list[tuple[int, int, MessageEntity]] = []
 
     if entities:
         for ent in entities:
-            py_start = u16_to_py.get(ent.offset)
-            py_end = u16_to_py.get(ent.offset + ent.length)
+            py_start = u16_map.to_python(ent.offset)
+            py_end = u16_map.to_python(ent.offset + ent.length)
             if py_start is None or py_end is None or py_end <= py_start:
                 continue
             if ent.type in _VERBATIM_ENTITY_TYPES:
-                if not _overlaps_any(py_start, py_end, occupied):
+                if not occupied.overlaps(py_start, py_end):
                     verbatims.append(
                         _VerbatimSpan(
                             start=py_start,
@@ -367,14 +402,14 @@ def prepare_text_for_translation(
                             entity_template=ent,
                         )
                     )
-                    occupied.append((py_start, py_end))
+                    occupied.add(py_start, py_end)
             elif ent.type in _STYLE_ENTITY_TYPES:
                 candidate_styles.append((py_start, py_end, ent))
 
     # Detect backtick code blocks in uncovered text
     for match in _FENCED_CODE_RE.finditer(text):
         s, e = match.span()
-        if _overlaps_any(s, e, occupied):
+        if occupied.overlaps(s, e):
             continue
         if parse_inline_code_markdown:
             lang = match.group(1) or None
@@ -393,14 +428,14 @@ def prepare_text_for_translation(
                         ),
                     )
                 )
-                occupied.append((s, e))
+                occupied.add(s, e)
         else:
             verbatims.append(_VerbatimSpan(start=s, end=e, replacement=text[s:e]))
-            occupied.append((s, e))
+            occupied.add(s, e)
 
     for match in _INLINE_CODE_RE.finditer(text):
         s, e = match.span()
-        if _overlaps_any(s, e, occupied):
+        if occupied.overlaps(s, e):
             continue
         inner = match.group(1)
         if parse_inline_code_markdown and inner:
@@ -414,7 +449,7 @@ def prepare_text_for_translation(
             )
         else:
             verbatims.append(_VerbatimSpan(start=s, end=e, replacement=text[s:e]))
-        occupied.append((s, e))
+        occupied.add(s, e)
 
     # Emails, URLs, and @mentions in uncovered text
     for regex, ent_type in (
@@ -429,7 +464,7 @@ def prepare_text_for_translation(
                 if not trimmed:
                     continue
                 e = s + len(trimmed)
-            if _overlaps_any(s, e, occupied):
+            if occupied.overlaps(s, e):
                 continue
             tmpl = (
                 MessageEntity(type=ent_type, offset=0, length=0)
@@ -444,17 +479,17 @@ def prepare_text_for_translation(
                     entity_template=tmpl,
                 )
             )
-            occupied.append((s, e))
+            occupied.add(s, e)
 
     # Optional token-level glossary masking for classic non-LLM translators
     if protect_glossary_tokens and glossary:
-        glossary_re = _compile_glossary_pattern(glossary)
+        glossary_re = _compile_glossary_pattern(tuple(glossary))
         if glossary_re is not None:
             for match in glossary_re.finditer(text):
                 s, e = match.span()
-                if s < e and not _overlaps_any(s, e, occupied):
+                if s < e and not occupied.overlaps(s, e):
                     verbatims.append(_VerbatimSpan(start=s, end=e, replacement=text[s:e]))
-                    occupied.append((s, e))
+                    occupied.add(s, e)
 
     verbatims.sort(key=lambda v: v.start)
 
@@ -518,29 +553,38 @@ def prepare_text_for_translation(
 
     encoded_parts: list[str] = []
     probe_parts: list[str] = []
-    pos = 0
     text_len = len(text)
 
-    while pos < text_len:
-        if pos in closes_at:
-            for st in closes_at[pos]:
-                encoded_parts.append(f"</s{st.span_id}>")
-        if pos in opens_at:
-            for st in opens_at[pos]:
-                encoded_parts.append(f"<s{st.span_id}>")
+    # Walk only the positions where a marker is emitted and copy the plain runs
+    # between them in one slice (instead of appending character by character).
+    cut_points = sorted(
+        cut for cut in {*verbatim_by_start, *opens_at, *closes_at} if cut < text_len
+    )
+    pos = 0
+    for cut in cut_points:
+        if cut < pos:
+            continue  # inside a verbatim span: the original loop skips it too
+        if cut > pos:
+            chunk = text[pos:cut]
+            encoded_parts.append(chunk)
+            probe_parts.append(chunk)
+            pos = cut
+        for st in closes_at.get(cut, ()):
+            encoded_parts.append(f"</s{st.span_id}>")
+        for st in opens_at.get(cut, ()):
+            encoded_parts.append(f"<s{st.span_id}>")
 
-        v_entry = verbatim_by_start.get(pos)
+        v_entry = verbatim_by_start.get(cut)
         if v_entry is not None:
             v_idx, v_span = v_entry
             encoded_parts.append(f"{token_prefix}{v_idx}X")
             probe_parts.append(" ")
             pos = v_span.end
-            continue
 
-        ch = text[pos]
-        encoded_parts.append(ch)
-        probe_parts.append(ch)
-        pos += 1
+    if pos < text_len:
+        tail = text[pos:]
+        encoded_parts.append(tail)
+        probe_parts.append(tail)
 
     if text_len in closes_at:
         for st in closes_at[text_len]:
@@ -558,6 +602,17 @@ def prepare_text_for_translation(
     )
 
 
+@lru_cache(maxsize=8)
+def _marker_pattern(token_prefix: str) -> re.Pattern[str]:
+    """Compiled marker scanner for `token_prefix` (compiled once per process)."""
+    return re.compile(
+        rf"(?P<open>[<«]\s*s(?P<open_id>\d+)\s*[>»])"
+        rf"|(?P<close>[<«]\s*/\s*s(?P<close_id>\d+)\s*[>»])"
+        rf"|(?P<verb>{re.escape(token_prefix)}(?P<verb_id>\d+)X)",
+        re.IGNORECASE,
+    )
+
+
 def restore_formatted_text(
     translated: str,
     prepared: PreparedFormatting,
@@ -570,12 +625,7 @@ def restore_formatted_text(
         clipped = translated[:max_length]
         return RestoredFormatting(text=clipped, entities=None)
 
-    marker_re = re.compile(
-        rf"(?P<open>[<«]\s*s(?P<open_id>\d+)\s*[>»])"
-        rf"|(?P<close>[<«]\s*/\s*s(?P<close_id>\d+)\s*[>»])"
-        rf"|(?P<verb>{re.escape(prepared.token_prefix)}(?P<verb_id>\d+)X)",
-        re.IGNORECASE,
-    )
+    marker_re = _marker_pattern(prepared.token_prefix)
 
     styles_by_id = {st.span_id: st for st in prepared.styles}
     out_chars: list[str] = []

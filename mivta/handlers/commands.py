@@ -1682,7 +1682,7 @@ def _render_owner_status_html(
     for idx, st in enumerate(statuses):
         p_name = escape(st.name)
         if st.cooldown_remaining > 0.0:
-            cd_secs = max(1, int(round(st.cooldown_remaining)))
+            cd_secs = max(1, round(st.cooldown_remaining))
             err_suffix = f", {escape(st.last_error_type)}" if st.last_error_type else ""
             state_txt = (
                 f"⏳ cooldown {cd_secs}s{err_suffix}"
@@ -1702,11 +1702,11 @@ def _render_owner_status_html(
     if cache is not None and cache.enabled:
         fill = len(cache)
         cap = cache.max_size
-        pct = int(round((fill / cap) * 100)) if cap > 0 else 0
+        pct = round((fill / cap) * 100) if cap > 0 else 0
         hits = cache.hits
         misses = cache.misses
         total_lookups = hits + misses
-        hit_rate = int(round((hits / total_lookups) * 100)) if total_lookups > 0 else 0
+        hit_rate = round((hits / total_lookups) * 100) if total_lookups > 0 else 0
         if lang == "en":
             cache_line = (
                 f"• Fill: <b>{fill} / {cap}</b> ({pct}%) · TTL {int(cache.ttl_seconds)}s\n"

@@ -78,7 +78,7 @@ async def run_command(
 
     def _run() -> CommandResult:
         try:
-            proc = subprocess.run(  # noqa: S603 - argv list only, never shell=True
+                proc = subprocess.run(  # argv list only, never shell=True
                 [str(part) for part in argv],
                 capture_output=True,
                 text=True,
@@ -307,7 +307,7 @@ async def _release_update_info(
     fetch = fetch_release or fetch_latest_release
     try:
         payload = await fetch(config.update_repo, RELEASE_TIMEOUT_SECONDS)
-    except Exception as exc:  # noqa: BLE001 - network errors must never break /update
+    except Exception as exc:  # network errors must never break /update
         return UpdateInfo(source="release", error=f"{type(exc).__name__}: {exc}"[:200])
     if not isinstance(payload, dict) or not payload:
         return UpdateInfo(source="release", error="empty release response")
@@ -327,7 +327,7 @@ async def _release_update_info(
 
 async def fetch_latest_release(repo: str, timeout: float) -> dict[str, Any] | None:
     """Fetch the latest GitHub release payload (imported lazily to keep startup lean)."""
-    import httpx  # noqa: PLC0415 - optional network path, only used by /update
+    import httpx  # optional network path, only used by /update
 
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     headers = {"Accept": "application/vnd.github+json", "User-Agent": f"mivta/{__version__}"}
@@ -429,7 +429,7 @@ async def apply_self_update(
 def run_detached(argv: Sequence[str]) -> CommandResult:
     """Fire-and-forget an allowlisted restart/update command (no shell, no pipes)."""
     try:
-        subprocess.Popen(  # noqa: S603 - argv list only, never shell=True
+        subprocess.Popen(  # argv list only, never shell=True
             [str(part) for part in argv],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -481,7 +481,7 @@ def write_marker(config: Config, marker: ServiceMarker) -> Path | None:
     try:
         tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
         tmp.chmod(0o600)
-        os.replace(tmp, path)
+        tmp.replace(path)
     except OSError:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -579,7 +579,7 @@ async def announce_pending_marker(bot: Any, config: Config) -> bool:
             text=text,
             parse_mode="HTML",
         )
-    except Exception:  # noqa: BLE001 - a report must never break startup
+    except Exception:  # a report must never break startup
         logger.warning(
             "could not report %s result to chat %s",
             marker.action,
@@ -631,9 +631,9 @@ def _self_exec() -> None:
     """Replace the current process with a fresh one (PID and systemd unit survive)."""
     argv = [sys.executable, "-m", "mivta", *sys.argv[1:]]
     try:
-        os.execv(sys.executable, argv)  # noqa: S606 - re-exec, no shell involved
+        os.execv(sys.executable, argv)  # re-exec, no shell involved
     except OSError:
-        os.execv(sys.argv[0], [sys.argv[0], *sys.argv[1:]])  # noqa: S606 - last resort
+        os.execv(sys.argv[0], [sys.argv[0], *sys.argv[1:]])  # last resort
 
 
 

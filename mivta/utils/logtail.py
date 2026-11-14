@@ -56,7 +56,7 @@ class LogTail(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = record.getMessage()
-        except Exception:  # noqa: BLE001 - a broken %-format must never raise in logging
+        except Exception:  # a broken %-format must never raise in logging
             message = "<unrenderable log record>"
         message = " ".join(message.split())
         if len(message) > MAX_LINE_LENGTH:
