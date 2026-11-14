@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 from typing import Any
 
 from aiogram import Bot
@@ -623,6 +624,53 @@ async def test_group_admin_only_settings_ignore_list_and_callbacks() -> None:
         assert (await db.get_group_settings(-100555)).is_enabled is False
         await dp.feed_update(bot, _grp_msg(73, "/grouppause on", uid=900))
         assert (await db.get_group_settings(-100555)).is_enabled is True
+    finally:
+        await db.close()
+        await bot.session.close()
+
+
+async def test_group_reading_line_keeps_bold_header_entities() -> None:
+    """In groups the reading is added to the body only; the «Name:» header stays bold."""
+    config = Config(bot_token="123:TOK", inline_debounce_ms=0)
+    db = Database(":memory:")
+    await db.connect()
+    translator = TagEchoTranslator()
+    original_translate = translator.translate
+
+    async def _ru_translate(request: Any) -> Any:
+        result = await original_translate(request)
+        if request.target_lang == "ru":
+            return replace(result, translated_text="Привет, как дела?")
+        return result
+
+    translator.translate = _ru_translate  # type: ignore[method-assign]
+
+    session = GroupMockSession(admin_ids={900})
+    bot = Bot(token=config.bot_token, session=session)
+    dp = create_dispatcher(config=config, db=db, translator=translator, bot_username="mivtabot")
+
+    try:
+        await db.update_group_settings(-100555, target_lang="ru", is_enabled=True)
+
+        # Toggle off: the bot posts only the translation.
+        await dp.feed_update(bot, _grp_msg(600, "> Hello there"))
+        sent = [c for c in session.calls if isinstance(c, SendMessage)][-1]
+        assert sent.text == "👨‍💻 Рудольф: Привет, как дела?"
+
+        # Toggle on: a second, Latin line appears under the body.
+        await db.update_user_settings(501, transliterate=True)
+        session.calls.clear()
+        await dp.feed_update(bot, _grp_msg(601, "> Hello there"))
+        sent = [c for c in session.calls if isinstance(c, SendMessage)][-1]
+        header, _, body = sent.text.partition(": ")
+        assert header == "👨‍💻 Рудольф"
+        assert body == "Привет, как дела?\nPrivet, kak dela?"
+
+        # The bold header entity covers only the name, not the appended reading.
+        bold = [e for e in (sent.entities or ()) if e.type == "bold"]
+        assert len(bold) == 1
+        assert bold[0].offset == 0
+        assert bold[0].length == utf16_len("👨‍💻 Рудольф")
     finally:
         await db.close()
         await bot.session.close()

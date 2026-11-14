@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import datetime as dt
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +201,7 @@ def _business_msg_update(
     sender_uid: int = 777,
     interlocutor_chat_id: int = 999,
     edited: bool = False,
+    entities: list[MessageEntity] | None = None,
 ) -> Update:
     msg = Message(
         message_id=update_id,
@@ -208,6 +210,7 @@ def _business_msg_update(
         from_user=_user(sender_uid),
         business_connection_id=conn_id,
         text=text,
+        entities=entities,
     )
     if edited:
         return Update(update_id=update_id, edited_business_message=msg)
@@ -478,6 +481,94 @@ async def test_business_mode_translates_outgoing_in_place_without_via_bot(harnes
     assert isinstance(session.calls[0], SendMessage)
     assert session.calls[0].chat_id == 777
 
+
+
+async def test_reading_line_is_appended_when_toggle_is_on(harness) -> None:
+    """«Как читается» shows up in Business, group and inline output — off by default."""
+    dp, bot, session, db, translator, _, _ = harness
+
+    original_translate = translator.translate
+
+    async def _ru_translate(request: Any) -> Any:
+        result = await original_translate(request)
+        if request.target_lang == "ru":
+            return replace(result, translated_text="Привет, как дела?")
+        return result
+
+    translator.translate = _ru_translate  # type: ignore[method-assign]
+
+    await db.update_user_settings(777, target_lang="ru")
+    await dp.feed_update(bot, _business_conn_update(80, conn_id="bc-read", owner_uid=777))
+    session.calls.clear()
+
+    # 1. Toggle off (default): plain translation, nothing appended.
+    await dp.feed_update(bot, _business_msg_update(81, "> Hello there", conn_id="bc-read"))
+    off_edit = session.calls[-1]
+    assert isinstance(off_edit, EditMessageText)
+    assert off_edit.text == "Привет, как дела?"
+
+    # 2. Turn the per-user toggle on.
+    await db.update_user_settings(777, transliterate=True)
+    session.calls.clear()
+    await dp.feed_update(bot, _business_msg_update(82, "> Hello there", conn_id="bc-read"))
+    on_edit = session.calls[-1]
+    assert isinstance(on_edit, EditMessageText)
+    lines = on_edit.text.splitlines()
+    assert lines[0] == "Привет, как дела?"
+    assert len(lines) == 2
+    assert lines[1].isascii()
+    assert lines[1] == "Privet, kak dela?"
+
+    # 3. Inline card carries the reading in the message body...
+    session.calls.clear()
+    await dp.feed_update(bot, _inline_update(83, "Hello there"))
+    answer = [c for c in session.calls if isinstance(c, AnswerInlineQuery)][-1]
+    assert answer.results[0].input_message_content.message_text == (
+        "Привет, как дела?\nPrivet, kak dela?"
+    )
+
+    # 4. ...and the toggle survives a re-read from the database.
+    assert (await db.get_user_settings(777)).transliterate is True
+
+
+async def test_reading_line_does_not_shift_entities(harness) -> None:
+    """The reading is appended after entity offsets are resolved, so they stay put."""
+    dp, bot, session, db, translator, _, _ = harness
+
+    original_translate = translator.translate
+
+    async def _ru_translate(request: Any) -> Any:
+        result = await original_translate(request)
+        if request.target_lang == "ru":
+            # Keep the entity placeholders intact: only the word is translated.
+            return replace(result, translated_text=request.text.replace("Hello", "Привет"))
+        return result
+
+    translator.translate = _ru_translate  # type: ignore[method-assign]
+
+    await db.update_user_settings(777, target_lang="ru", transliterate=True)
+    await dp.feed_update(bot, _business_conn_update(90, conn_id="bc-ent", owner_uid=777))
+    session.calls.clear()
+
+    # `> ` is 2 chars, so the bold entity sits at offset 2 in the raw message.
+    await dp.feed_update(
+        bot,
+        _business_msg_update(
+            91,
+            "> Hello",
+            conn_id="bc-ent",
+            entities=[MessageEntity(type="bold", offset=2, length=5)],
+        ),
+    )
+    edit = session.calls[-1]
+    assert isinstance(edit, EditMessageText)
+    assert edit.text == "Привет\nPrivet"
+
+    # The bold entity still covers exactly the translated word, not the reading.
+    bold = [e for e in (edit.entities or ()) if e.type == "bold"]
+    assert len(bold) == 1
+    assert bold[0].offset == 0
+    assert bold[0].length == len("Привет")
 
 
 def test_translator_package_is_independent_of_telegram_and_sqlite() -> None:

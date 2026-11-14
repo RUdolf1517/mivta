@@ -62,6 +62,10 @@ from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_business_query
 from mivta.utils.ratelimit import RateLimiter
 from mivta.utils.telegram import call_with_retry
+from mivta.utils.transliteration import (
+    reading_enabled,
+    with_reading,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1282,6 +1286,12 @@ def build_group_router() -> Router:
         )
         effective_style = prelim.style or g_settings.style or u_settings.style
         explicit_override = prelim.source_lang is not None or prelim.target_lang is not None
+        # Auto-swap can redirect the request, so the reading follows the language
+        # the text was actually translated into.
+        reading_lang = effective_target
+        reading_on = reading_enabled(
+            u_settings.transliterate, config.transliterate_default
+        )
 
         prepared = prepare_text_for_translation(
             prelim.text,
@@ -1306,6 +1316,7 @@ def build_group_router() -> Router:
                 swap_lang=effective_swap,
                 explicit_override=explicit_override,
             )
+            reading_lang = resolved_target
             request = TranslationRequest(
                 text=prepared.encoded_text,
                 source_lang=effective_source,
@@ -1346,7 +1357,13 @@ def build_group_router() -> Router:
         if not restored.text:
             return
 
-        full_text = f"{header_prefix}{restored.text}"
+        body_text = with_reading(
+            restored.text,
+            reading_lang,
+            enabled=reading_on,
+            max_total=body_budget,
+        )
+        full_text = f"{header_prefix}{body_text}"
         name_u16 = utf16_len(author_name)
         prefix_u16 = utf16_len(header_prefix)
 

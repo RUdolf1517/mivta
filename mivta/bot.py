@@ -175,6 +175,16 @@ def _extract_update_user_id(update: Update) -> int | None:
     return None
 
 
+def _warm_up_transliteration() -> None:
+    """Load the romanizer tables off the event loop (they are CPU-bound)."""
+    try:
+        from mivta.utils.transliteration import warm_up  # noqa: PLC0415 - heavy
+
+        warm_up()
+    except Exception:  # pragma: no cover - optional feature
+        logger.exception("failed to warm up transliteration")
+
+
 def create_dispatcher(
     *,
     config: Config,
@@ -479,6 +489,7 @@ async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
     )
     bot = Bot(token=config.bot_token)
     janitor_task: asyncio.Task[None] | None = None
+    warmup_task: asyncio.Task[None] | None = None
     restart = RestartController()
     webhook_stop_event = asyncio.Event()
     restart.bind_stop(webhook_stop_event.set)
@@ -521,6 +532,11 @@ async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
             interval = max(5.0, min(60.0, config.cache_ttl / 2.0))
             janitor_task = asyncio.create_task(_cache_janitor(cache, interval))
 
+        # «Как читается» is opt-in; pre-load the romanizers only when somebody
+        # actually uses it, otherwise the import cost is never paid.
+        if config.transliterate_default or await db.has_transliterate_enabled():
+            warmup_task = asyncio.create_task(asyncio.to_thread(_warm_up_transliteration))
+
         business_enabled = bool(getattr(me, "can_connect_to_business", False))
         mode_name = "webhook" if config.webhook_url else "polling"
         logger.info(
@@ -554,6 +570,10 @@ async def run_bot(config: Config, log_tail: LogTail | None = None) -> None:
             janitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await janitor_task
+        if warmup_task is not None:
+            warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await warmup_task
         cache.clear()
         await translator.aclose()
         await http_client.aclose()

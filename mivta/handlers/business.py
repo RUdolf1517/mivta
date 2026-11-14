@@ -33,6 +33,10 @@ from mivta.utils.metrics import RuntimeMetrics
 from mivta.utils.parser import has_translatable_text, parse_business_query
 from mivta.utils.ratelimit import RateLimiter
 from mivta.utils.telegram import call_with_retry
+from mivta.utils.transliteration import (
+    reading_enabled,
+    with_reading,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +243,9 @@ async def handle_business_message(
     explicit_override = parsed.source_lang is not None or parsed.target_lang is not None
 
     telegram_max = TELEGRAM_MAX_CAPTION_LEN if is_caption else TELEGRAM_MAX_MESSAGE_LEN
+    # Auto-swap can redirect the request, so the reading follows the language the
+    # text was actually translated into.
+    reading_lang = effective_target
     prepared = prepare_text_for_translation(
         parsed.text,
         entities=parsed.entities,
@@ -262,6 +269,7 @@ async def handle_business_message(
             swap_lang=user_settings.swap_lang,
             explicit_override=explicit_override,
         )
+        reading_lang = resolved_target
         request = TranslationRequest(
             text=prepared.encoded_text,
             source_lang=effective_source,
@@ -333,7 +341,14 @@ async def handle_business_message(
             emit_entities_only_if_rich=False,
         )
 
-    final_text = restored.text
+    final_text = with_reading(
+        restored.text,
+        reading_lang,
+        enabled=reading_enabled(
+            user_settings.transliterate, config.transliterate_default
+        ),
+        max_total=telegram_max,
+    )
     final_entities = restored.entities
     if not final_text or (final_text == raw_content and not final_entities):
         return

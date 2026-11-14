@@ -17,6 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY mivta ./mivta
 COPY pyproject.toml LICENSE README.md ./
 RUN pip install --no-cache-dir --no-deps .
+# Optional «как читается» extra: docker build --build-arg MIVTA_EXTRAS=reading .
+ARG MIVTA_EXTRAS=""
+RUN if [ -n "$MIVTA_EXTRAS" ]; then \
+      pip install --no-cache-dir ".[$MIVTA_EXTRAS]"; \
+    fi
 
 USER mivta
 

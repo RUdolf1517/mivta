@@ -26,6 +26,8 @@ AUTO_UPDATE="${MIVTA_AUTO_UPDATE:-1}"
 AUTO_UPDATE_TIME="${MIVTA_AUTO_UPDATE_TIME:-06:00}"
 REMOTE_UPDATE="${MIVTA_REMOTE_UPDATE:-1}"
 ACTION="install"
+# Optional extra «как читается» (Latin reading for non-Latin scripts, ~14 MB)
+WITH_READING="${WITH_READING:-0}"
 PURGE=0
 
 ARG_BOT_TOKEN="${BOT_TOKEN:-}"
@@ -74,6 +76,8 @@ Options:
   --webhook-port <PORT>    Local port for Webhook HTTP server (default: 8080)
   --dir <PATH>             Install directory (default: /opt/mivta)
   --branch <BRANCH>        Git branch or tag to install (default: main)
+  --with-reading           Also install the optional «как читается» extra (uroman,
+                           pypinyin, pykakasi); remembered across --self-update
   --from-local [DIR]       Install from local checkout instead of cloning GitHub
   --auto-update-time <T>   Daily auto-update & restart time (default: 06:00)
   --no-auto-update         Disable daily systemd auto-update & restart timer
@@ -190,6 +194,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-systemd)
       NO_SYSTEMD=1
+      shift
+      ;;
+    --with-reading)
+      WITH_READING=1
       shift
       ;;
     --uninstall)
@@ -370,6 +378,27 @@ normalize_oncalendar() {
   printf '%s\n' "$raw"
 }
 
+# Optional extras requested for this install, persisted in $INSTALL_DIR/.extras
+# so `--self-update` reinstalls them after a code refresh.
+want_reading_extra() {
+  [ "$WITH_READING" = "1" ] && return 0
+  [ -f "$INSTALL_DIR/.extras" ] || return 1
+  grep -qx "reading" "$INSTALL_DIR/.extras" 2>/dev/null
+}
+
+install_extras() {
+  if want_reading_extra; then
+    say "Installing optional «как читается» extra (uroman, pypinyin, pykakasi)..."
+    if "$INSTALL_DIR/.venv/bin/pip" install -q "${INSTALL_DIR}[reading]"; then
+      mkdir -p "$INSTALL_DIR"
+      grep -qx "reading" "$INSTALL_DIR/.extras" 2>/dev/null \
+        || printf 'reading\n' >>"$INSTALL_DIR/.extras"
+    else
+      warn "failed to install the «как читается» extra; the feature will stay off"
+    fi
+  fi
+}
+
 verify_venv_imports() {
   "$INSTALL_DIR/.venv/bin/python" -I -c \
     "import mivta.bot, mivta.config, mivta.database, mivta.translator" >/dev/null 2>&1
@@ -456,6 +485,7 @@ do_self_update() {
     if ! (
       "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt" &&
       "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR" &&
+      install_extras &&
       verify_venv_imports
     ); then
       warn "updated revision ${new_rev:0:7} failed verification; rolling back to ${old_rev:0:7}"
@@ -878,6 +908,7 @@ main() {
   say "Installing Python dependencies..."
   "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
   "$INSTALL_DIR/.venv/bin/pip" install -q --no-deps --force-reinstall "$INSTALL_DIR"
+  install_extras
 
   # Verify imports work on the target machine before wiring up the service
   if ! verify_venv_imports; then

@@ -43,6 +43,19 @@ def test_config_defaults_and_env_precedence(tmp_path: Path) -> None:
     assert cfg.default_source_lang == "auto"
     assert cfg.default_style == TranslationStyle.FORMAL
     assert cfg.translator_provider == "google"
+    assert cfg.transliterate_default is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("1", True), ("true", True), ("on", True), ("0", False), ("no", False), ("off", False)],
+)
+def test_transliterate_default_parsing(raw: str, expected: bool) -> None:
+    cfg = Config.from_env(
+        env={"BOT_TOKEN": "1:abc", "TRANSLITERATE": raw},
+        dotenv_path=None,
+    )
+    assert cfg.transliterate_default is expected
 
 
 @pytest.mark.parametrize(

@@ -425,6 +425,7 @@ class Config:
     inline_style_variants: bool = True
     inline_debounce_ms: int = 180
     allow_insecure_http_api: bool = False
+    transliterate_default: bool = False
 
     webhook_url: str = ""
     webhook_path: str = "/webhook"
@@ -552,6 +553,10 @@ class Config:
             minimum=0,
             maximum=2000,
         )
+        transliterate_default = _parse_bool(
+            "TRANSLITERATE",
+            merged.get("TRANSLITERATE", "false"),
+        )
 
         webhook_url, webhook_path = _normalize_webhook(
             merged.get("WEBHOOK_URL", "").strip(),
@@ -676,6 +681,7 @@ class Config:
             inline_style_variants=inline_style_variants,
             inline_debounce_ms=inline_debounce_ms,
             allow_insecure_http_api=allow_insecure_http,
+            transliterate_default=transliterate_default,
             webhook_url=webhook_url,
             webhook_path=webhook_path,
             webhook_host=webhook_host,

@@ -168,6 +168,51 @@ async def test_settings_panel_is_one_screen_and_help_is_separate(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_reading_toggle_round_trip(tmp_path: Path) -> None:
+    db = Database(tmp_path / "reading_ui.db")
+    await db.connect()
+    try:
+        cfg = Config(bot_token="123456:ABCDEF", default_ui_lang="ru")
+        dp = create_dispatcher(
+            config=cfg,
+            db=db,
+            translator=StubTranslator(),
+            bot_username="mivtabot",
+        )
+        bot = CapturingBot()
+
+        # Off by default, and the target language (EN) has no reading at all.
+        await dp.feed_update(bot, _msg_update(1, user_id=555, text="/settings"))
+        panel = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "Чтение латиницей: недоступно" in panel.text
+        assert "cfg:toggle_reading" in _button_rows(panel.reply_markup)
+
+        # A Latin target refuses the toggle and changes nothing.
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(2, user_id=555, data="cfg:toggle_reading"))
+        assert (await db.get_user_settings(555)).transliterate is None
+
+        # Switch the target to Russian: the toggle becomes available.
+        await db.update_user_settings(555, target_lang="ru")
+        bot.calls.clear()
+        await dp.feed_update(bot, _msg_update(3, user_id=555, text="/settings"))
+        panel = [c for c in bot.calls if isinstance(c, SendMessage)][-1]
+        assert "Чтение латиницей: выкл" in panel.text
+
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(4, user_id=555, data="cfg:toggle_reading"))
+        assert (await db.get_user_settings(555)).transliterate is True
+        edited = [c for c in bot.calls if isinstance(c, EditMessageText)][-1]
+        assert "Чтение латиницей: вкл" in edited.text
+
+        bot.calls.clear()
+        await dp.feed_update(bot, _cb_update(5, user_id=555, data="cfg:toggle_reading"))
+        assert (await db.get_user_settings(555)).transliterate is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_help_guide_has_sections_with_jump_buttons(tmp_path: Path) -> None:
     """`/help` shows the whole guide; `hlp:*` opens one section in the same message."""
     from mivta.handlers.commands import HELP_SECTIONS
